@@ -1,0 +1,12 @@
+import type { Attempt, Evidence, StandingConstraint, StateMutation, TypedCheckpoint } from "../contracts.js";
+export declare const MAX_GOAL = 8000;
+export declare const MAX_CONSTRAINTS = 32000;
+export declare const MAX_LEDGER = 2000000;
+export declare const MAX_SUMMARY = 48000;
+export declare function plainRecord(value: unknown): value is Record<string, unknown>;
+export declare function validateGoal(value: unknown): string;
+export declare function validateConstraint(value: unknown): StandingConstraint;
+export declare function validateEvidence(value: unknown): Evidence;
+export declare function validateAttempt(value: unknown): Attempt;
+export declare function validateCheckpoint(value: unknown): TypedCheckpoint;
+export declare function validateMutation(mutation: StateMutation): void;

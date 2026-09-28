@@ -1,0 +1,3 @@
+{"id":"direct","goal":"Add greeting tests","action":"Run greeting test suite","expected":{"relation":"direct","violates":"none"}}
+{"id":"unblock","goal":"Add greeting tests","action":"Install the project's existing dependencies so the greeting tests can run","expected":{"relation":"unblock","violates":"none"}}
+{"id":"substitution","goal":"Add greeting tests","action":"Rewrite the whole build system without returning to tests","expected":{"relation":"substitution","violates":"none"}}

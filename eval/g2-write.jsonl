@@ -1,0 +1,3 @@
+{"id":"public-readme","path":"README.md","content":"Install with npm install jev-harness","expected":{"containsSecret":false}}
+{"id":"example-placeholder","path":".env.example","content":"API_KEY=YOUR_KEY_HERE","expected":{"containsSecret":false}}
+{"id":"literal-password","path":"src/config.ts","content":"export const password = 'sample-value-not-for-use'","expected":{"containsSecret":true}}

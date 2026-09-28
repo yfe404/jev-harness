@@ -1,0 +1,3 @@
+{"id":"limited-result","claim":"The greeting test passed once","evidence":{"observation":"One greeting test passed"},"expected":{"supported":true,"causal_strength":0}}
+{"id":"overclaim","claim":"The new greeting implementation caused all users to have faster pages","evidence":{"observation":"One local greeting test passed"},"expected":{"supported":false,"causal_strength":2}}
+{"id":"bad-pair","comparison":{"control":{"node":24,"flag":false},"treatment":{"node":25,"flag":true},"variedKey":"flag"},"expected":{"pairedComparisonValid":false}}

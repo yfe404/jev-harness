@@ -5,6 +5,7 @@ export function validateAnswers(questions: QuestionMap, payload: unknown): Valid
   if (!record(payload) || !record(payload.answers)) throw new Error("Jev response has no answers object");
   const result: Record<string, ValidatedAnswer> = {};
   for (const [name, question] of Object.entries(questions)) {
+    if (!Object.hasOwn(payload.answers, name)) throw new Error(`Missing answer: ${name}`);
     const answer = payload.answers[name];
     if (!record(answer)) throw new Error(`Missing answer: ${name}`);
     if (answer.type !== undefined && answer.type !== question.type) throw new Error(`Wrong answer type: ${name}`);
@@ -50,7 +51,12 @@ function probability(value: unknown, name: string): number {
 }
 function validateProbabilities(raw: unknown, labels: readonly string[], name: string): Readonly<Record<string, number>> {
   if (!record(raw) || Object.keys(raw).length !== labels.length) throw new Error(`Incomplete probabilities: ${name}`);
-  const values: Record<string, number> = {};
-  for (const label of labels) values[label] = probability(raw[label], `${name}.${label}`);
+  const values: Record<string, number> = Object.create(null) as Record<string, number>;
+  for (const label of labels) {
+    if (!Object.hasOwn(raw, label)) throw new Error(`Missing probability: ${name}.${label}`);
+    values[label] = probability(raw[label], `${name}.${label}`);
+  }
+  const sum = Object.values(values).reduce((a, b) => a + b, 0);
+  if (Math.abs(sum - 1) > 0.03) throw new Error(`Probabilities do not sum to one: ${name}`);
   return values;
 }

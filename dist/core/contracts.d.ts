@@ -98,6 +98,14 @@ export interface Decision {
     readonly probabilities: Readonly<Record<string, number>>;
     readonly alternative?: string;
     readonly validationId?: string;
+    /** Id of a successfully committed constraint, attempt, or evidence entry. */
+    readonly recordedId?: string;
+    /** Dedup comparisons may be capped; a partial search never claims complete coverage. */
+    readonly coverage?: Readonly<{
+        checked: number;
+        total: number;
+        complete: boolean;
+    }>;
 }
 export interface ToolResultDecision {
     readonly decision: Decision;
@@ -118,6 +126,8 @@ export interface Evidence {
     readonly observedAt: string;
     readonly method: string;
     readonly observation: string;
+    /** Only the trusted harness can attach a result derived from structured observations. */
+    readonly result?: TrialResult;
     readonly artifactRef?: string;
 }
 export interface Attempt {
@@ -160,6 +170,11 @@ export type StateMutation = Readonly<{
 }> | Readonly<{
     kind: "evidence";
     evidence: Evidence;
+}> | Readonly<{
+    kind: "attempt-result";
+    attemptId: string;
+    result: TrialResult;
+    evidenceIds: readonly string[];
 }> | Readonly<{
     kind: "checkpoint";
     checkpoint: TypedCheckpoint;
@@ -234,16 +249,30 @@ export interface AuditEntry {
     readonly gateId: string;
     readonly stateHash: string;
     readonly decision: Decision;
+    /** Validated Jev answers for offline replay; never include raw prompt or state. */
+    readonly answers?: ValidatedAnswers;
     readonly elapsedMs: number;
 }
 export interface AuditService {
     /** Must complete durably before an enforcement verdict reaches the adapter. */
     append(entry: AuditEntry): Promise<void>;
 }
+export interface RuntimeService {
+    get(context: EventContext): Promise<Readonly<{
+        frozen: boolean;
+        planReviewed: boolean;
+    }>>;
+    freeze(context: EventContext): Promise<void>;
+    /** Called only when the corrective request settles or the owner explicitly resets it. */
+    clear(context: EventContext): Promise<void>;
+    markPlanReviewed(context: EventContext): Promise<void>;
+}
 export interface HarnessServices {
     readonly provider: DecisionProvider;
     readonly state: StateService;
     readonly audit: AuditService;
+    /** Optional injected request lock service; defaults to session-scoped local files. */
+    readonly runtime?: RuntimeService;
     readonly now?: () => Date;
 }
 export interface HarnessOptions {

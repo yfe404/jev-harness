@@ -1,0 +1,3 @@
+{"id":"standing-rule","input":{"text":"Do not add dependencies."},"expected":{"kind":"standing_constraint","capture":true,"freeze":false}}
+{"id":"one-time-request","input":{"text":"Run the tests now."},"expected":{"kind":"one_off","capture":false,"freeze":false}}
+{"id":"correction","input":{"text":"Stop changing configuration files. Explain the next step first."},"expected":{"kind":"standing_constraint","capture":true,"freeze":true}}

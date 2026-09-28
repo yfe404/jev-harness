@@ -1,5 +1,21 @@
 export { createHarness } from "./core/harness.js";
 export { validateAnswers } from "./core/answers.js";
+export { createJevClient, ProviderUnavailableError } from "./core/client.js";
+export type { JevClientOptions, JevTransport } from "./core/client.js";
+export { createFileStateService, initializeProject, readProject, classifyWritePath, canSendFileToJev } from "./core/state/files.js";
+export { createFileRuntimeService, getRequestState, freezeRequest, clearRequestFreeze, markPlanReviewed } from "./core/state/locks.js";
+export { createFileAuditService, loadAudit, replayVerdict } from "./core/report.js";
+export { runBatchedGates } from "./core/run.js";
+export { containsKnownSecret, redactText, redactValue, isPrivatePath } from "./core/redact.js";
+export { g1Bash } from "./core/gates/g1-bash.js";
+export { g2Write } from "./core/gates/g2-write.js";
+export { g3Result } from "./core/gates/g3-result.js";
+export { g4Capture } from "./core/gates/g4-capture.js";
+export { g5Stop } from "./core/gates/g5-stop.js";
+export { g6Plan } from "./core/gates/g6-plan.js";
+export { g7Dedup } from "./core/gates/g7-dedup.js";
+export { g8Claim, validPairedComparison } from "./core/gates/g8-claim.js";
+export type { DedupComparison } from "./core/gates/g7-dedup.js";
 export type {
   Action, AuditEntry, AuditService, Attempt, CheckClaimEvent, ChoiceQuestion,
   CompactionAcknowledgmentEvent, CompactionDecision, CompactionValidationEvent,
@@ -7,6 +23,6 @@ export type {
   GateQuery, GateVerdict, Harness, HarnessOptions, HarnessServices, Host, Mode,
   NoulQuestion, ProviderRequest, Question, QuestionMap, RecordEvidenceEvent,
   RegisterAttemptEvent, ScoreQuestion, StandingConstraint, StateMutation,
-  StateService, StateSnapshot, ToolPreflightEvent, ToolResultDecision, ToolResultEvent,
+  StateService, StateSnapshot, RuntimeService, ToolPreflightEvent, ToolResultDecision, ToolResultEvent,
   TrialResult, TypedCheckpoint, UserInputEvent, ValidatedAnswer, ValidatedAnswers,
 } from "./core/contracts.js";

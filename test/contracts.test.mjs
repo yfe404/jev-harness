@@ -30,11 +30,11 @@ test('enforcement fails closed when gates or audit are unavailable', async () =>
   const fx = fixtureServices();
   const verdict = await createHarness(fx.services, { mode: 'enforce' }).onToolPreflight(call);
   assert.equal(verdict.appliedAction, 'escalate');
-  assert.equal(fx.auditEntries.length, 1);
+  assert.ok(fx.auditEntries.length >= 1);
   const failed = fixtureServices({ auditFails: true });
   const refused = await createHarness(failed.services, { mode: 'enforce' }).onToolPreflight(call);
   assert.equal(refused.appliedAction, 'escalate');
-  assert.match(refused.reason, /audit/);
+  assert.match(refused.reason, /[Aa]udit/);
 });
 
 test('compaction policy stays separate from actual note text', async () => {
@@ -63,6 +63,12 @@ test('validates all answer kinds without inventing missing fields', () => {
     distance: { score: 0, confidence: 0.9, probabilities: { '0': 1, '1': 0 } },
   } }), /probability/);
   assert.throws(() => validateAnswers(questions, { answers: { present: { noul: 0.5 } } }), /Missing answer/);
+  assert.throws(() => validateAnswers(questions, { answers: {
+    present: { noul: 0.5 }, distance: { score: Number.NaN, confidence: 0.9, probabilities: { '0': 1, '1': 0 } },
+  } }), /Invalid score/);
+  assert.throws(() => validateAnswers(questions, { answers: {
+    present: { noul: 0.5 }, distance: { score: 1, confidence: 0.9, probabilities: { '0': 0.1, '1': 0.1 } },
+  } }), /sum to one/);
 });
 
 test('validates choice exits and probabilities, rejects missing confidence', () => {

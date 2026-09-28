@@ -4,6 +4,8 @@ export function validateAnswers(questions, payload) {
         throw new Error("Jev response has no answers object");
     const result = {};
     for (const [name, question] of Object.entries(questions)) {
+        if (!Object.hasOwn(payload.answers, name))
+            throw new Error(`Missing answer: ${name}`);
         const answer = payload.answers[name];
         if (!record(answer))
             throw new Error(`Missing answer: ${name}`);
@@ -54,8 +56,14 @@ function probability(value, name) {
 function validateProbabilities(raw, labels, name) {
     if (!record(raw) || Object.keys(raw).length !== labels.length)
         throw new Error(`Incomplete probabilities: ${name}`);
-    const values = {};
-    for (const label of labels)
+    const values = Object.create(null);
+    for (const label of labels) {
+        if (!Object.hasOwn(raw, label))
+            throw new Error(`Missing probability: ${name}.${label}`);
         values[label] = probability(raw[label], `${name}.${label}`);
+    }
+    const sum = Object.values(values).reduce((a, b) => a + b, 0);
+    if (Math.abs(sum - 1) > 0.03)
+        throw new Error(`Probabilities do not sum to one: ${name}`);
     return values;
 }
