@@ -1,0 +1,41 @@
+# claim-observed-tests-only
+goal: Make the greeting tests pass.
+
+> register the attempt before running anything
+gate:      g7-dedup
+mode:      enforce
+status:    ready
+proposed:  allow
+applied:   allow
+reason:    No repeat among prior attempts
+recorded:  a-<id>
+coverage:  0/0
+
+> claim with no observed evidence: "The greeting tests pass"
+gate:      g8-claim
+mode:      enforce
+status:    ready
+proposed:  block
+applied:   block
+reason:    Blocked: Claim lacks cited observed evidence. Allowed alternative: Cite an observed evidence id or phrase the result as unverified.. This block is final; do not work around it.
+alternative: Cite an observed evidence id or phrase the result as unverified.
+
+> the harness executes the test command and observes it
+  (trusted embedding API: the expectation below is declared before running;
+   the jh CLI can only record the observation, never grade it)
+observed: exit 0; stdout: greet: 1 passed; stderr: (empty)
+gate:      evidence
+mode:      enforce
+status:    ready
+proposed:  allow
+applied:   allow
+reason:    Observed evidence recorded
+recorded:  e-<id>
+
+> the same claim, now citing the observed evidence
+gate:      g8-claim
+mode:      enforce
+status:    ready
+proposed:  allow
+applied:   allow
+reason:    Claim is supported by cited observations

@@ -127,10 +127,16 @@ export function validateMutation(mutation) {
             break;
         case "checkpoint":
             validateCheckpoint(mutation.checkpoint);
+            if (mutation.appliedValidationId !== undefined)
+                id(mutation.appliedValidationId, "validation id");
             break;
         case "compaction-ack":
             id(mutation.compactionId, "compaction id");
             id(mutation.validationId, "validation id");
+            if (mutation.checkpoint !== undefined)
+                validateCheckpoint(mutation.checkpoint);
+            if (mutation.countEvidence !== undefined && typeof mutation.countEvidence !== "boolean")
+                throw new Error("Invalid countEvidence flag");
             break;
         default: throw new Error("Unknown state mutation");
     }

@@ -2,6 +2,7 @@
 // Claude Code does not provide a request id on tool hooks, so the dispatcher
 // remembers the current request per session in ignored .harness/runtime/ state.
 import { createHash, randomUUID } from "node:crypto";
+import { closeSync, fstatSync, openSync, readSync } from "node:fs";
 import { lstat, mkdir, open, readFile, realpath, rename, unlink } from "node:fs/promises";
 import { join } from "node:path";
 
@@ -15,9 +16,52 @@ export interface ClaudeSessionStore {
 const FILE_LIMIT = 4096;
 const digest = (value: string) => createHash("sha256").update(value).digest("hex");
 
-/** Derive a retry-stable request id: re-sent identical prompts map to the same request. */
-export function requestIdForPrompt(sessionId: string, transcriptPath: string | undefined, prompt: string): string {
-  return `req-${digest(`${sessionId}\n${transcriptPath ?? ""}\n${prompt}`).slice(0, 24)}`;
+/**
+ * Best-effort stable identity of the current transcript boundary: the `uuid`
+ * of the last transcript entry, read synchronously from the tail of the file.
+ * The official hook documentation notes the transcript is written
+ * asynchronously and may lag the current turn, and does not specify whether a
+ * failed hook execution is ever retried — so this is a dedup hint, not a
+ * guarantee. Returns undefined when no usable boundary exists.
+ */
+export function transcriptBoundary(transcriptPath: string | undefined): string | undefined {
+  if (!transcriptPath || transcriptPath.includes("\0")) return undefined;
+  let fd: number;
+  try { fd = openSync(transcriptPath, "r"); } catch { return undefined; }
+  try {
+    const size = fstatSync(fd).size;
+    if (size <= 0 || size > 512 * 1024 * 1024) return undefined;
+    const tail = Buffer.alloc(Math.min(size, 65_536));
+    const read = readSync(fd, tail, 0, tail.length, size - tail.length);
+    if (read <= 0) return undefined;
+    const lines = tail.subarray(0, read).toString("utf8").split("\n").filter(line => line.trim());
+    const last = lines.at(-1);
+    if (!last) return undefined;
+    const parsed: unknown = JSON.parse(last);
+    if (parsed && typeof parsed === "object" && typeof (parsed as { uuid?: unknown }).uuid === "string") {
+      return (parsed as { uuid: string }).uuid;
+    }
+    return undefined;
+  } catch { return undefined; }
+  finally { closeSync(fd); }
+}
+
+/**
+ * Derive the request id for one accepted prompt delivery. Two separately
+ * accepted prompts with identical text are distinct requests and must not
+ * reuse an old id (a repeated prompt after a correction is a new request, not
+ * a retry), so each delivery mixes in a per-delivery discriminator:
+ * an explicit `delivery` value (tests), else the current transcript boundary,
+ * else fresh entropy. A redelivered hook payload observed at the same
+ * transcript boundary dedupes to the same id and is treated as a retry, so a
+ * duplicate delivery cannot release a later request's freeze; core
+ * idempotency dedupes any repeated acceptance of the same id. Without a
+ * transcript boundary there is no way to distinguish a redelivery from a
+ * genuinely re-sent prompt — that limit is documented in docs/claude-code.md.
+ */
+export function requestIdForPrompt(sessionId: string, transcriptPath: string | undefined, prompt: string, delivery?: string): string {
+  const discriminator = delivery ?? transcriptBoundary(transcriptPath) ?? randomUUID();
+  return `req-${digest(`${sessionId}\n${transcriptPath ?? ""}\n${prompt}\n${discriminator}`).slice(0, 24)}`;
 }
 /** Deterministic fallback when no accepted prompt was recorded for the session. */
 export function fallbackRequestId(sessionId: string): string {

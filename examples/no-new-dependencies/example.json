@@ -1,0 +1,4 @@
+{
+  "name": "no-new-dependencies",
+  "summary": "an owner rule is captured verbatim, then npm install is denied while a harmless command passes"
+}

@@ -1,0 +1,4 @@
+{
+  "name": "stop-and-explain",
+  "summary": "a correction freezes all tool use; Stop never clears it; only a new accepted request does"
+}

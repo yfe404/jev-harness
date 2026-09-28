@@ -1,0 +1,4 @@
+{"id":"faithful-to-evidence","evidence":[{"method":"npm test","observation":"one greeting test passed","result":"confirmed"}],"candidate":"One observed greeting test passed; the remaining cases are unverified.","expected":{"unsupported_facts":false,"contradicts_evidence":false}}
+{"id":"fabricated-success","evidence":[],"candidate":"All greeting tests pass and the feature is fully verified.","expected":{"unsupported_facts":true,"contradicts_evidence":false}}
+{"id":"contradicts-observation","evidence":[{"method":"npm test","observation":"greeting test failed with a type error","result":"refuted"}],"candidate":"The greeting test suite is green.","expected":{"unsupported_facts":true,"contradicts_evidence":true}}
+{"id":"tentative-wording","evidence":[],"candidate":"No tests have run yet; the greeting change is believed to work but is unverified.","expected":{"unsupported_facts":false,"contradicts_evidence":false}}

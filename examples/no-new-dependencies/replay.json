@@ -1,0 +1,11 @@
+{
+  "replies": [
+    { "gate": "g4-capture", "when": "never add new dependencies", "answers": { "kind": "standing_constraint" } },
+    { "gate": "g4-capture", "answers": { "kind": "one_off" } },
+    { "gate": "g5-stop", "answers": { "stop_or_correct": 0.05 } },
+    { "gate": "g1-bash", "when": "npm install", "answers": { "effect": "reversible", "violates_constraint": 0.2 } },
+    { "gate": "g1-bash", "answers": { "effect": "read_only", "violates_constraint": 0.05 } },
+    { "gate": "g6-plan", "when": "npm install", "answers": { "violates": { "matching": "never add new dependencies" }, "relation_to_goal": "detour" } },
+    { "gate": "g6-plan", "answers": { "violates": "none", "relation_to_goal": "direct" } }
+  ]
+}

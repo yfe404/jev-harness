@@ -95,8 +95,15 @@ export function validateMutation(mutation: StateMutation): void {
       list(mutation.evidenceIds, "result evidence ids");
       if (mutation.evidenceIds.length === 0) throw new Error("No observed harness evidence");
       break;
-    case "checkpoint": validateCheckpoint(mutation.checkpoint); break;
-    case "compaction-ack": id(mutation.compactionId, "compaction id"); id(mutation.validationId, "validation id"); break;
+    case "checkpoint":
+      validateCheckpoint(mutation.checkpoint);
+      if (mutation.appliedValidationId !== undefined) id(mutation.appliedValidationId, "validation id");
+      break;
+    case "compaction-ack":
+      id(mutation.compactionId, "compaction id"); id(mutation.validationId, "validation id");
+      if (mutation.checkpoint !== undefined) validateCheckpoint(mutation.checkpoint);
+      if (mutation.countEvidence !== undefined && typeof mutation.countEvidence !== "boolean") throw new Error("Invalid countEvidence flag");
+      break;
     default: throw new Error("Unknown state mutation");
   }
 }

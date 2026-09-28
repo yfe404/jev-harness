@@ -1,7 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
 import { open, mkdir, readFile, realpath, rename, lstat, stat } from "node:fs/promises";
 import { join, relative, resolve, sep, dirname, basename } from "node:path";
-import type { Attempt, EventContext, Evidence, StandingConstraint, StateMutation, StateService, StateSnapshot, TypedCheckpoint } from "../contracts.js";
+import type { Attempt, CompactionCycle, EventContext, Evidence, StandingConstraint, StateMutation, StateService, StateSnapshot, TypedCheckpoint } from "../contracts.js";
+import { targetEvidenceMark } from "../compaction.js";
 import { isPrivatePath } from "../redact.js";
 import { MAX_CONSTRAINTS, MAX_GOAL, MAX_LEDGER, MAX_SUMMARY, plainRecord, validateAttempt, validateCheckpoint, validateConstraint, validateEvidence, validateGoal, validateMutation } from "./schema.js";
 
@@ -98,10 +99,29 @@ export async function readProject(projectRoot: string): Promise<StateSnapshot | 
   if (!plainRecord(parsed) || !Array.isArray(parsed.compactionIds) || parsed.compactionIds.length > 10_000 ||
       parsed.compactionIds.some((v: unknown) => typeof v !== "string" || !/^[A-Za-z0-9_-]{1,80}$/.test(v)) ||
       new Set(parsed.compactionIds).size !== parsed.compactionIds.length) throw new Error("Malformed summary.json");
+  const compactionIds = parsed.compactionIds as string[];
+  let compactionCycles: CompactionCycle[];
+  if (parsed.compactionCycles === undefined) {
+    // Legacy file: cycles recorded before evidence-mark tracking never count as stagnant.
+    compactionCycles = compactionIds.map(id => ({ id, evidence: null }));
+  } else {
+    if (!Array.isArray(parsed.compactionCycles) || parsed.compactionCycles.length !== compactionIds.length) throw new Error("Malformed summary.json");
+    compactionCycles = parsed.compactionCycles.map((cycle: unknown, index: number) => {
+      if (!plainRecord(cycle) || cycle.id !== compactionIds[index] ||
+          (cycle.evidence !== null && (typeof cycle.evidence !== "string" || !/^[0-9a-f]{64}$/.test(cycle.evidence))))
+        throw new Error("Malformed summary.json");
+      return { id: cycle.id as string, evidence: cycle.evidence as string | null };
+    });
+  }
   const checkpoint: TypedCheckpoint | null = parsed.checkpoint === null ? null : validateCheckpoint(parsed.checkpoint);
+  if (parsed.checkpointAcks !== undefined &&
+      (!Array.isArray(parsed.checkpointAcks) || parsed.checkpointAcks.length > 10_000 ||
+       parsed.checkpointAcks.some((v: unknown) => typeof v !== "string" || !/^[A-Za-z0-9_-]{1,80}$/.test(v)) ||
+       new Set(parsed.checkpointAcks).size !== parsed.checkpointAcks.length)) throw new Error("Malformed summary.json");
+  const checkpointAcks = (parsed.checkpointAcks ?? []) as string[];
   return {
     revision: hash(contents.join("\u0000")), goal, constraints, attempts, evidence,
-    summary: checkpoint, compactionIds: parsed.compactionIds as string[],
+    summary: checkpoint, compactionIds, compactionCycles, checkpointAcks,
   };
 }
 
@@ -213,12 +233,30 @@ export function createFileStateService(): StateService {
             break;
           }
           case "checkpoint": {
-            await atomic(join(dir, "summary.json"), JSON.stringify({ checkpoint: mutation.checkpoint, compactionIds: previous.compactionIds }, null, 2) + "\n");
+            const priorAcks = previous.checkpointAcks ?? [];
+            // The application marker is written atomically with the checkpoint, so
+            // a replayed acknowledgment can never republish a historical checkpoint.
+            if (mutation.appliedValidationId !== undefined && priorAcks.includes(mutation.appliedValidationId)) return previous;
+            const checkpointAcks = mutation.appliedValidationId === undefined ? priorAcks : [...priorAcks, mutation.appliedValidationId];
+            await atomic(join(dir, "summary.json"), JSON.stringify({ checkpoint: mutation.checkpoint,
+              compactionIds: previous.compactionIds, compactionCycles: previous.compactionCycles, checkpointAcks }, null, 2) + "\n");
             break;
           }
           case "compaction-ack": {
-            if (previous.compactionIds.includes(mutation.compactionId)) return previous;
-            await atomic(join(dir, "summary.json"), JSON.stringify({ checkpoint: previous.summary, compactionIds: [...previous.compactionIds, mutation.compactionId] }, null, 2) + "\n");
+            const priorAcks = previous.checkpointAcks ?? [];
+            // Single atomic application: counter/cycle, merged checkpoint, and the
+            // durable application marker are written together, so a replayed
+            // acknowledgment is a pure no-op and an interrupted one recovers as
+            // exactly one compare-and-swap against the validated revision.
+            if (priorAcks.includes(mutation.validationId)) return previous;
+            const count = mutation.countEvidence !== false && !previous.compactionIds.includes(mutation.compactionId);
+            // Bind the cycle to the target-evidence mark at acknowledgment time so
+            // stagnation survives reload and resets only on new confirmed/refuted evidence.
+            const cycles = previous.compactionCycles ?? previous.compactionIds.map(id => ({ id, evidence: null }));
+            await atomic(join(dir, "summary.json"), JSON.stringify({ checkpoint: mutation.checkpoint ?? previous.summary,
+              compactionIds: count ? [...previous.compactionIds, mutation.compactionId] : previous.compactionIds,
+              compactionCycles: count ? [...cycles, { id: mutation.compactionId, evidence: targetEvidenceMark(previous) }] : cycles,
+              checkpointAcks: [...priorAcks, mutation.validationId] }, null, 2) + "\n");
             break;
           }
         }

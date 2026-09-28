@@ -1,0 +1,10 @@
+{
+  "replies": [
+    { "gate": "g4-capture", "when": "backward compatible", "answers": { "kind": "standing_constraint" } },
+    { "gate": "g4-capture", "answers": { "kind": "one_off" } },
+    { "gate": "g5-stop", "answers": { "stop_or_correct": 0.05 } },
+    { "gate": "g2-write", "answers": { "contains_secret": 0.05 } },
+    { "gate": "g6-plan", "when": "api.ts", "answers": { "violates": { "matching": "backward compatible" }, "relation_to_goal": "substitution" } },
+    { "gate": "g6-plan", "answers": { "violates": "none", "relation_to_goal": "direct" } }
+  ]
+}

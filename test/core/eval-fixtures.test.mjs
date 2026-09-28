@@ -6,7 +6,7 @@ import test from 'node:test';
 const evalDir = new URL('../../eval/', import.meta.url);
 test('synthetic evaluation fixtures are labelled, parsable, and contain no real credentials', async () => {
   const files = (await readdir(evalDir)).filter(f => f.endsWith('.jsonl'));
-  assert.equal(files.length, 7);
+  assert.equal(files.length, 9);
   for (const file of files) {
     const raw = await readFile(new URL(file, evalDir), 'utf8');
     const cases = raw.trim().split('\n').map(line => JSON.parse(line));

@@ -1,0 +1,5 @@
+{
+  "replies": [
+    { "gate": "g8-claim", "answers": { "supported": 0.9, "causal_strength": 0 } }
+  ]
+}

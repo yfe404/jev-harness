@@ -18,3 +18,9 @@ jobs:
       - name: Verify committed runtime files match TypeScript
         run: git diff --exit-code -- dist/
       - run: npm pack --dry-run
+      - name: Smoke-test the packed tarball in an isolated install
+        run: npm run smoke
+        env:
+          TYPESAFE_API_KEY: ''
+          OPENROUTER_API_KEY: ''
+          JH_REPLAY: ''

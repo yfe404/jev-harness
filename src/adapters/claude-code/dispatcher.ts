@@ -4,16 +4,30 @@
 //
 // Hard rules implemented here:
 // - Never emit permissionDecision "allow"; pass-through is exit 0 with empty stdout.
-// - Never block or erase the user's own prompt at UserPromptSubmit.
+// - Never block or erase the user's own prompt at UserPromptSubmit, with one
+//   narrow exception: in enforce mode an accepted request whose classification
+//   is unavailable/uncertain AND whose fail-closed hold could not be persisted
+//   is rejected with exit 2, because enforcement unavailable is never approval
+//   and the agent must not start on an unclassified, unheld request.
 // - Never clear a correction freeze at Stop; Stop is always a pass-through.
 // - PostToolUse for built-in tools is advisory only (output cannot be replaced).
-// - PreCompact only prints plain-text preservation guidance; it cannot see,
-//   block, or replace Claude's native summary.
-// - In enforce mode, dispatcher errors on PreToolUse become a deny; a crashed or
-//   timed-out hook is a host-level fail-open path, documented in docs/security.md.
-import type { Decision, EventContext, Harness, Mode, StateSnapshot } from "../../core/contracts.js";
-import { readProject } from "../../core/state/files.js";
+// - PreCompact is a pass-through: its stdout never reaches Claude or the native
+//   summary (official hook contract), so policy is restored at SessionStart.
+// - An accepted prompt whose classification is unavailable or uncertain
+//   re-establishes a fail-closed tool hold in enforce mode; a prior freeze is
+//   never silently released without a successful classification. If the hold
+//   cannot be persisted, the submission is blocked with exit 2 — a hold is
+//   never claimed that was not durably recorded.
+// - A PreToolUse call the dispatcher cannot parse or evaluate is denied with
+//   exit 2 (the supported blocking channel); a crashed or timed-out hook is a
+//   host-level fail-open path, documented in docs/security.md.
+import type {
+  Decision, EventContext, Harness, Mode, RuntimeService, StateSnapshot,
+} from "../../core/contracts.js";
+import { buildRetainedPolicyBlock } from "../../core/compaction.js";
 import { redactText } from "../../core/redact.js";
+import { readProject } from "../../core/state/files.js";
+import { createFileRuntimeService } from "../../core/state/locks.js";
 import {
   fallbackRequestId, requestIdForPrompt, createFileSessionStore, type ClaudeSessionStore,
 } from "./session.js";
@@ -28,9 +42,12 @@ export interface ClaudeDispatcherOptions {
   /** Environment lookup; CLAUDE_PROJECT_DIR wins over the event's cwd. */
   readonly env?: Readonly<Record<string, string | undefined>>;
   readonly sessions?: ClaudeSessionStore;
-  /** Canonical policy read for SessionStart/PreCompact; defaults to readProject. */
+  /** Freeze service for the fail-closed hold; defaults to the file service. */
+  readonly runtime?: RuntimeService;
+  /** Canonical policy read for SessionStart; defaults to readProject. */
   readonly readState?: (projectRoot: string) => Promise<StateSnapshot | null>;
-  /** Bound on injected policy text; default 3000 chars. */
+  /** Bound on injected policy text; default 3000 chars. Oldest entries are
+   * dropped first and the omission is stated, never silently truncated. */
   readonly policyCharLimit?: number;
 }
 
@@ -58,8 +75,30 @@ function deny(reason: string): HookResponse {
   });
 }
 
+/**
+ * Deny through exit 2, the supported blocking channel for error paths: per the
+ * official hook contract, exit 2 blocks PreToolUse even without parseable JSON,
+ * while exit 1 is a non-blocking error that lets the action proceed. The deny
+ * JSON is still read and names the reason.
+ */
+function denyBlocking(reason: string): HookResponse {
+  const response = deny(reason);
+  return { ...response, exitCode: 2 };
+}
+
 function advisory(event: "PostToolUse" | "UserPromptSubmit" | "SessionStart", message: string): HookResponse {
   return jsonResponse({ hookSpecificOutput: { hookEventName: event, additionalContext: cap(message, 3000) } });
+}
+
+/**
+ * Reject the current UserPromptSubmit through exit 2, the supported blocking
+ * channel: per the official hook contract, exit 2 there blocks prompt
+ * processing and shows stderr to the user (nothing is added to context). Used
+ * only when enforcement is unavailable AND the fail-closed hold could not be
+ * persisted — an accepted request must not proceed unclassified and unheld.
+ */
+function blockPrompt(reason: string): HookResponse {
+  return { exitCode: 2, stdout: "", stderr: `${oneLine(reason)}\n` };
 }
 
 /** Interactive permission modes can ask the owner; anything else must deny on escalation. */
@@ -91,17 +130,27 @@ function preflightResponse(decision: Decision, permissionMode: string | undefine
   }
 }
 
-function formatPolicy(state: StateSnapshot, limit: number): string {
-  const lines: string[] = [];
-  const goal = redactText(state.goal.trim());
-  if (goal) lines.push(`Goal: ${goal}`);
-  if (state.constraints.length) {
-    lines.push("Standing rules (.harness/constraints.md):");
-    for (const rule of state.constraints) lines.push(`- ${rule.id} (${rule.createdAt}): ${redactText(rule.text)}`);
+/**
+ * The canonical policy block (goal + standing rules + preserved key decisions),
+ * shared with the compaction validator so every surface injects the same text.
+ * Over the limit, the oldest standing rules are dropped first and the omission
+ * is stated on the marker line; the goal and the newest entries are kept.
+ */
+export function formatPolicy(state: StateSnapshot, limit: number): string {
+  const redacted = buildRetainedPolicyBlock(state).split("\n").map(line => redactText(line));
+  const text = redacted.join("\n");
+  if (text.length <= limit) return text;
+  const header = redacted.slice(0, 2); // banner + goal
+  const entries = redacted.slice(2);
+  const kept: string[] = [];
+  let budget = limit - header.join("\n").length - 80;
+  for (let i = entries.length - 1; i >= 0 && budget > 0; i--) {
+    if (entries[i]!.length > budget) break;
+    kept.unshift(entries[i]!);
+    budget -= entries[i]!.length + 1;
   }
-  let text = lines.join("\n");
-  if (text.length > limit) text = `${text.slice(0, limit - 60)}\n… (truncated; see .harness/constraints.md)`;
-  return text;
+  const omitted = entries.length - kept.length;
+  return [...header, `… (${omitted} older entries omitted; full policy in .harness/goal.md and .harness/constraints.md)`, ...kept].join("\n");
 }
 
 async function policyState(options: ClaudeDispatcherOptions, root: string): Promise<StateSnapshot | null> {
@@ -122,6 +171,27 @@ async function handleUserPrompt(
   // retry cannot double-capture or release/resurrect a freeze.
   if (!transition.fresh || transition.decision.status !== "ready") return PASS;
   const decision = await options.harness.onUserInput({ context: ctx, text: event.prompt, source: "user" });
+  if (options.mode === "enforce" && (decision.status === "unavailable" || decision.status === "escalation")) {
+    // Fail closed: the request was already accepted (which may have released a
+    // prior freeze) but its classification did not succeed, so tool use must
+    // not proceed on an unclassified request. Re-establish the hold against
+    // the new request; only a later accepted and successfully classified
+    // request (or an explicit owner reset) releases it.
+    const runtime = options.runtime ?? createFileRuntimeService();
+    let holdPersisted = true;
+    try { await runtime.freeze(ctx); } catch { holdPersisted = false; }
+    if (!holdPersisted) {
+      // A failed lock write leaves nothing for the next preflight to read, so
+      // the request would run unclassified and unheld — and enforcement
+      // unavailable is never approval. Reject the submission with exit 2 (the
+      // supported UserPromptSubmit blocking channel) instead of an advisory
+      // that lets the agent start; never claim a hold that does not exist.
+      return blockPrompt(
+        `[jev-harness] This request could not be classified (${oneLine(decision.reason)}) and the fail-closed hold could not be persisted, so tool use is NOT durably held. The submission was rejected to prevent work on an unclassified request: inspect .harness/runtime/ for the failed write, then re-send the request, or run \`jh mode shadow\` to lift enforcement explicitly.`);
+    }
+    return advisory("UserPromptSubmit",
+      `[jev-harness] This request could not be classified (${oneLine(decision.reason)}). Tool use stays on hold in enforce mode. Reply in text only; the owner may restate the request, or run \`jh mode shadow\` to lift enforcement.`);
+  }
   if (decision.appliedAction === "freeze") {
     return advisory("UserPromptSubmit",
       "[jev-harness] Tool use is paused for this request. Reply in text only: acknowledge the correction, explain what you did and why, then wait for the next user message.");
@@ -174,22 +244,13 @@ async function handlePostToolUse(
   return PASS;
 }
 
-async function handlePreCompact(
-  event: Extract<ClaudeHookEvent, { event: "PreCompact" }>,
-  options: ClaudeDispatcherOptions,
-): Promise<HookResponse> {
-  // Plain text only: stdout is appended verbatim to the native summary's custom
-  // instructions. This hook cannot see, veto, or replace that summary.
-  const root = projectRoot(event.base, options.env);
-  const state = await policyState(options, root);
-  if (!state) return PASS;
-  const policy = formatPolicy(state, options.policyCharLimit ?? 3000);
-  if (!policy) return PASS;
-  return {
-    exitCode: 0,
-    stdout: `Preserve the project goal and every standing rule below verbatim in the summary:\n${policy}\n`,
-    stderr: "",
-  };
+function handlePreCompact(): HookResponse {
+  // Pass-through. Per the official hook contract, PreCompact stdout is not
+  // added to Claude's context and cannot edit the native summary's
+  // instructions; printing "preserve these rules" text here would claim a
+  // protection that does not exist. Policy survives compaction because
+  // SessionStart (source=compact) re-injects the canonical block afterwards.
+  return PASS;
 }
 
 async function handleSessionStart(
@@ -212,7 +273,7 @@ async function handle(event: ClaudeHookEvent, options: ClaudeDispatcherOptions):
     case "UserPromptSubmit": return handleUserPrompt(event, options, sessions);
     case "PreToolUse": return handlePreToolUse(event, options, sessions);
     case "PostToolUse": return handlePostToolUse(event, options, sessions);
-    case "PreCompact": return handlePreCompact(event, options);
+    case "PreCompact": return handlePreCompact();
     case "SessionStart": return handleSessionStart(event, options);
     case "Stop":
       // Never clear a freeze, never block (a block forces more agent work, and
@@ -223,22 +284,31 @@ async function handle(event: ClaudeHookEvent, options: ClaudeDispatcherOptions):
 }
 
 /**
- * Dispatch one raw hook payload. Never throws: malformed input and internal errors
- * degrade to a pass-through, except PreToolUse in enforce mode, which denies.
+ * Dispatch one raw hook payload. Never throws. Failure policy:
+ * - Payload whose hook event cannot be established at all (not JSON, no known
+ *   hook_event_name): exit 2 with a generic stderr line, never echoing the
+ *   input — fail closed, because an unparseable PreToolUse must not pass.
+ * - Malformed or unevaluable PreToolUse: deny JSON plus exit 2, in every mode
+ *   (shadow never applies a gate verdict, but an input no gate could evaluate
+ *   is not a verdict).
+ * - Other malformed events and internal errors on non-PreToolUse events:
+ *   pass-through, because those events cannot block anything meaningful and an
+ *   exit 2 there would erase the user's prompt or force more agent work.
  */
 export async function dispatchClaudeHook(rawInput: unknown, options: ClaudeDispatcherOptions): Promise<HookResponse> {
   let parsed: ClaudeHookEvent;
   try { parsed = parseHookInput(rawInput); }
   catch {
-    return hookEventName(rawInput) === "PreToolUse" && options.mode === "enforce"
-      ? deny("jev-harness could not parse this tool call; blocked in enforce mode")
-      : PASS;
+    const name = hookEventName(rawInput);
+    if (name === "PreToolUse") return denyBlocking("jev-harness could not parse this tool call; denied because the gate could not evaluate it");
+    if (name === null) return { exitCode: 2, stdout: "", stderr: "jev-harness: malformed hook input; the hook event could not be established\n" };
+    return PASS;
   }
   try { return await handle(parsed, options); }
   catch (error) {
-    if (parsed.event === "PreToolUse" && options.mode === "enforce") {
+    if (parsed.event === "PreToolUse") {
       const message = error instanceof Error ? error.message.replace(/[\n\r\0]+/g, " ").slice(0, 200) : "unknown error";
-      return deny(`jev-harness internal error; blocked in enforce mode: ${message}`);
+      return denyBlocking(`jev-harness internal error; denied because the gate could not evaluate the call: ${message}`);
     }
     return PASS;
   }

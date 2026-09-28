@@ -14,3 +14,7 @@ export { g5Stop } from "./core/gates/g5-stop.js";
 export { g6Plan } from "./core/gates/g6-plan.js";
 export { g7Dedup } from "./core/gates/g7-dedup.js";
 export { g8Claim, validPairedComparison } from "./core/gates/g8-claim.js";
+export { g9Drift } from "./core/gates/g9-drift.js";
+export { g10Fidelity } from "./core/gates/g10-fidelity.js";
+export { buildRetainedPolicyBlock, checkpointHash, compactionCandidateHash, mergeCheckpoint, stagnantCycles, targetEvidenceMark, STAGNATION_HALT, STAGNATION_REPLAN } from "./core/compaction.js";
+export { createFileCompactionRegistry, createMemoryCompactionRegistry } from "./core/state/registry.js";

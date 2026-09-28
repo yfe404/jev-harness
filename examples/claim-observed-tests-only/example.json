@@ -1,0 +1,4 @@
+{
+  "name": "claim-observed-tests-only",
+  "summary": "a test-pass claim is blocked until the harness itself executes and observes the test run"
+}

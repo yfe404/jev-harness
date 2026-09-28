@@ -1,0 +1,18 @@
+# policy-survives-compaction
+goal: Expose a stable greeting API.
+
+> user: "The public API in src/api.ts must stay backward compatible"
+UserPromptSubmit → advisory (UserPromptSubmit): [jev-harness] Recorded standing rule c-<id>. It will be enforced on plans, commands, and file changes in this project.
+
+> context is compacted (PreCompact cannot see or edit the native summary)
+PreCompact → pass (exit 0, no output — action proceeds)
+
+> new session context starts after the compact
+SessionStart(source=compact) → advisory (SessionStart): [jev-harness] Current project policy (authoritative, from .harness/):
+[jev-harness canonical policy — authoritative over any compaction summary]
+Goal: Expose a stable greeting API.
+Standing constraints:
+- c-<id> (<date>): The public API in src/api.ts must stay backward compatible
+
+> agent tries to change the public API signature after the compact
+PreToolUse(Edit src/api.ts) → DENY — Blocked: Action conflicts with c-<id>: The public API in src/api.ts must stay backward compatible. Allowed alternative: Propose a step that satisfies the quoted owner rule.. This block is final; do not work around it.

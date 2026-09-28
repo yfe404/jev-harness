@@ -8,12 +8,16 @@ import { g5Stop } from "./gates/g5-stop.js";
 import { g6Plan } from "./gates/g6-plan.js";
 import { g7Dedup } from "./gates/g7-dedup.js";
 import { g8Claim, validPairedComparison } from "./gates/g8-claim.js";
+import { g9Drift } from "./gates/g9-drift.js";
+import { g10Fidelity } from "./gates/g10-fidelity.js";
+import { buildRetainedPolicyBlock, checkpointHash, compactionCandidateHash, mergeCheckpoint, stagnantCycles, STAGNATION_HALT, STAGNATION_REPLAN } from "./compaction.js";
 import { finalBlock, needsOwner } from "./messages.js";
 import { containsKnownSecret, isPrivatePath, redactText, redactValue } from "./redact.js";
 import { digest } from "./report.js";
 import { classifyWritePath, canSendFileToJev } from "./state/files.js";
 import { createFileRuntimeService } from "./state/locks.js";
-import { validateEvidence } from "./state/schema.js";
+import { createFileCompactionRegistry } from "./state/registry.js";
+import { validateCheckpoint, validateEvidence } from "./state/schema.js";
 const priority = ["halt", "freeze", "block", "escalate", "confirm", "redact", "replan", "capture", "remind", "allow", "none"];
 function inert(mode, gateId) {
     return { gateId, mode, status: "inert", proposedAction: "none", appliedAction: "none", reason: "Project is uninitialized or untrusted", probabilities: {} };
@@ -56,12 +60,18 @@ async function audit(services, ctx, state, result, answers, elapsedMs = 0) {
         return unavailable(result.mode, result.gateId, "Audit write failed; no gate action applied");
     }
 }
-/** Batches compatible questions into one request and audits each gate before applying actions. */
+const BATCH_BUDGET = 24_000;
+/** Batches compatible questions into provider requests and audits each gate before
+ * applying actions. Gates are packed deterministically (in gate order) into as few
+ * requests as fit the redaction budget; a gate whose redacted state alone exceeds
+ * the budget fails unavailable rather than being judged on truncated data. */
 export async function runBatchedGates(gates, ctx, state, services, mode, signal) {
     const start = performance.now();
     const prepared = [];
     try {
         for (const { gate, input } of gates) {
+            if (prepared.some(item => item.gate.id === gate.id))
+                throw new Error(`Duplicate gate id: ${gate.id}`);
             const query = gate.prepare(input, state);
             if (query)
                 prepared.push({ gate, input, query });
@@ -72,49 +82,83 @@ export async function runBatchedGates(gates, ctx, state, services, mode, signal)
     }
     if (!prepared.length)
         return [];
-    const questions = {};
-    const states = {};
-    for (const item of prepared) {
-        if (Object.hasOwn(states, item.gate.id))
-            throw new Error(`Duplicate gate id: ${item.gate.id}`);
-        states[item.gate.id] = item.query.state;
-        for (const [name, q] of Object.entries(item.query.questions))
-            questions[`${item.gate.id}_${name}`] = q;
-    }
-    let validated;
-    try {
-        const safeState = redactValue(states, 24_000);
-        const safeQuestions = redactValue(questions, 24_000);
-        if (Buffer.byteLength(JSON.stringify({ state: safeState, questions: safeQuestions })) > 24_000)
-            throw new Error("Jev batch too large");
-        const raw = await services.provider.decide({ state: safeState, questions: safeQuestions }, signal);
-        validated = validateAnswers(questions, raw);
-    }
-    catch {
-        const failed = [];
-        for (const { gate } of prepared)
-            failed.push(await audit(services, ctx, state, unavailable(mode, gate.id, "Jev verdict is unavailable or invalid"), undefined, performance.now() - start));
-        return failed;
-    }
     const results = [];
-    for (const { gate, input, query } of prepared) {
-        const answers = {};
-        for (const name of Object.keys(query.questions))
-            answers[name] = validated[`${gate.id}_${name}`];
+    const failAll = async (items, reason) => {
+        for (const { gate } of items)
+            results.push(await audit(services, ctx, state, unavailable(mode, gate.id, reason), undefined, performance.now() - start));
+    };
+    // Redact each gate's payload once; failures exclude only that gate.
+    const scrubbed = [];
+    for (const item of prepared) {
         try {
-            const minConfidence = gate.thresholds.human ?? 0.5;
-            const uncertain = Object.values(answers).some(answer => answer.confidence < minConfidence);
-            const verdict = uncertain
-                ? { action: "escalate", reason: "Jev answer confidence below the gate's human threshold" }
-                : gate.evaluate(input, answers, state);
-            let result = decision(mode, gate.id, verdict, answers);
-            if (gate.id === g3Result.id && !input.canReplaceOutput && result.appliedAction === "redact") {
-                result = { ...result, appliedAction: "remind", reason: `${result.reason}; host cannot replace the original output` };
-            }
-            results.push(await audit(services, ctx, state, result, answers, performance.now() - start));
+            const questions = {};
+            for (const [name, q] of Object.entries(item.query.questions))
+                questions[`${item.gate.id}_${name}`] = q;
+            const payload = redactValue({ state: { [item.gate.id]: item.query.state }, questions }, 1_000_000);
+            scrubbed.push({ item, state: payload.state[item.gate.id], questions: payload.questions, bytes: Buffer.byteLength(JSON.stringify(payload)) });
         }
         catch {
-            results.push(await audit(services, ctx, state, unavailable(mode, gate.id, "Gate evaluation failed"), undefined, performance.now() - start));
+            results.push(await audit(services, ctx, state, unavailable(mode, item.gate.id, "Gate state could not be redacted safely"), undefined, performance.now() - start));
+        }
+    }
+    // Greedy deterministic packing: exact merged size decides, gate order preserved.
+    const batches = [];
+    let current = [];
+    const merged = (batch) => ({
+        state: Object.fromEntries(batch.map(entry => [entry.item.gate.id, entry.state])),
+        questions: Object.assign({}, ...batch.map(entry => entry.questions)),
+    });
+    for (const entry of scrubbed) {
+        if (entry.bytes > BATCH_BUDGET) {
+            if (current.length) {
+                batches.push(current);
+                current = [];
+            }
+            await failAll([entry.item], "Gate state exceeds the provider request budget; refusing to judge truncated data");
+            continue;
+        }
+        if (current.length && Buffer.byteLength(JSON.stringify(merged([...current, entry]))) > BATCH_BUDGET) {
+            batches.push(current);
+            current = [];
+        }
+        current.push(entry);
+    }
+    if (current.length)
+        batches.push(current);
+    for (const batch of batches) {
+        if (signal?.aborted) {
+            await failAll(batch.map(e => e.item), "Operation cancelled before the Jev request");
+            continue;
+        }
+        const request = merged(batch);
+        let validated;
+        try {
+            const raw = await services.provider.decide(request, signal);
+            validated = validateAnswers(request.questions, raw);
+        }
+        catch {
+            await failAll(batch.map(e => e.item), "Jev verdict is unavailable or invalid");
+            continue;
+        }
+        for (const { item: { gate, input, query } } of batch) {
+            const answers = {};
+            for (const name of Object.keys(query.questions))
+                answers[name] = validated[`${gate.id}_${name}`];
+            try {
+                const minConfidence = gate.thresholds.human ?? 0.5;
+                const uncertain = Object.values(answers).some(answer => answer.confidence < minConfidence);
+                const verdict = uncertain
+                    ? { action: "escalate", reason: "Jev answer confidence below the gate's human threshold" }
+                    : gate.evaluate(input, answers, state);
+                let result = decision(mode, gate.id, verdict, answers);
+                if (gate.id === g3Result.id && !input.canReplaceOutput && result.appliedAction === "redact") {
+                    result = { ...result, appliedAction: "remind", reason: `${result.reason}; host cannot replace the original output` };
+                }
+                results.push(await audit(services, ctx, state, result, answers, performance.now() - start));
+            }
+            catch {
+                results.push(await audit(services, ctx, state, unavailable(mode, gate.id, "Gate evaluation failed"), undefined, performance.now() - start));
+            }
         }
     }
     return results;
@@ -122,14 +166,19 @@ export async function runBatchedGates(gates, ctx, state, services, mode, signal)
 function mostSevere(decisions, mode) {
     if (!decisions.length)
         return { gateId: "not-applicable", mode, proposedAction: "none", appliedAction: "none", status: "ready", reason: "No applicable gate", probabilities: {} };
-    return [...decisions].sort((a, b) => priority.indexOf(a.appliedAction) - priority.indexOf(b.appliedAction))[0];
+    // Shadow never applies verdicts, so rank by the proposed action: an unavailable
+    // gate (proposed escalate) must not hide behind a first gate's allow.
+    const severity = (d) => priority.indexOf(mode === "shadow" ? d.proposedAction : d.appliedAction);
+    return [...decisions].sort((a, b) => severity(a) - severity(b))[0];
 }
 export function createHarness(services, options = {}) {
     const mode = options.mode ?? "shadow";
     if (mode !== "shadow" && mode !== "enforce")
         throw new Error("Invalid harness mode");
     const runtime = services.runtime ?? createFileRuntimeService();
+    const evidenceWorkflow = options.evidenceWorkflow === true;
     const signal = options.signal;
+    const registryFor = (ctx) => services.compactionRegistry ?? createFileCompactionRegistry(ctx);
     async function snapshot(ctx, gateId) {
         if (!ctx.trusted)
             return { state: null, failed: inert(mode, gateId) };
@@ -351,7 +400,10 @@ export function createHarness(services, options = {}) {
                 return failed;
             if (!event.hypothesis.trim() || !event.method.trim() || containsKnownSecret(`${event.hypothesis}\n${event.method}`))
                 return hard(event.context, state, "g7-dedup", { action: "escalate", reason: "Attempt needs a safe hypothesis and method" });
-            const prior = state.attempts.filter(a => a.countsAsTrial && a.result !== "setup_failure");
+            // Compare every registered attempt that ran or is still pending: grading
+            // arrives later as observed evidence, so counting only settled trials
+            // would leave pending duplicates unchallenged. Setup failures never ran.
+            const prior = state.attempts.filter(a => a.result !== "setup_failure");
             const cap = 255;
             const comparison = prior.slice(0, cap);
             const matches = [];
@@ -367,7 +419,7 @@ export function createHarness(services, options = {}) {
             await Promise.all(Array.from({ length: Math.min(8, comparison.length) }, () => worker()));
             let result = matches.find(d => ["block", "escalate"].includes(d.proposedAction) || d.status === "unavailable") ??
                 await hard(event.context, state, g7Dedup.id, { action: prior.length > cap ? "escalate" : "allow",
-                    reason: prior.length > cap ? "Dedup search incomplete; owner must review the remaining attempts" : "No repeat among prior trials" });
+                    reason: prior.length > cap ? "Dedup search incomplete; owner must review the remaining attempts" : "No repeat among prior attempts" });
             result = { ...result, coverage: { checked: comparison.length, total: prior.length, complete: prior.length <= cap } };
             if (mode === "shadow" || result.appliedAction !== "allow" || result.status !== "ready" || prior.length > cap)
                 return result;
@@ -427,20 +479,196 @@ export function createHarness(services, options = {}) {
             const { state, failed } = await snapshot(event.context, "validate-compaction");
             if (failed || !state)
                 return { decision: failed, retainedPolicyBlock: "" };
-            // Fable's compaction module will replace this conservative boundary using G9/G10.
-            const policy = [state.goal.trim(), ...state.constraints.map(c => `${c.id}: ${c.text}`)].filter(Boolean).join("\n");
-            if (!event.summaryText.trim() && !event.noteToSelf?.trim())
+            const policy = buildRetainedPolicyBlock(state);
+            const note = event.noteToSelf;
+            if (typeof event.summaryText !== "string" || (note !== undefined && typeof note !== "string"))
+                return { decision: await hard(event.context, state, "validate-compaction", { action: "escalate", reason: "Candidate prose must be supplied as text" }), retainedPolicyBlock: policy };
+            if (!event.summaryText.trim() && !note?.trim())
                 return { decision: await hard(event.context, state, "validate-compaction", { action: "escalate", reason: "No actual prose or note supplied for validation" }), retainedPolicyBlock: policy };
-            return { decision: await hard(event.context, state, "validate-compaction", { action: "escalate", reason: "Compaction drift/fidelity validator not installed" }), retainedPolicyBlock: policy };
+            // Never transmit or persist a credential embedded in a candidate.
+            if (containsKnownSecret(event.summaryText) || (note !== undefined && containsKnownSecret(note)))
+                return { decision: await hard(event.context, state, "validate-compaction", { action: "escalate", reason: "Candidate contains a credential; ask for sanitized wording" }), retainedPolicyBlock: policy };
+            if (event.checkpoint !== undefined) {
+                try {
+                    validateCheckpoint(event.checkpoint);
+                }
+                catch {
+                    return { decision: await hard(event.context, state, "validate-compaction", { action: "escalate", reason: "Agent checkpoint fails schema or privacy checks" }), retainedPolicyBlock: policy };
+                }
+            }
+            // G9/G10 audit the actual candidate bytes; the candidate is never edited.
+            const decisions = await runBatchedGates([
+                { gate: g9Drift, input: event }, { gate: g10Fidelity, input: event },
+            ], event.context, state, services, mode, signal);
+            let result = mostSevere(decisions, mode);
+            const acceptable = result.status === "ready" && (result.proposedAction === "allow" || result.proposedAction === "remind");
+            if (!acceptable)
+                return { decision: result, retainedPolicyBlock: policy };
+            // Evidence-stagnation policy (opt-in workflow only): judge the next candidate
+            // against the prior successful cycles, never by rejecting their acknowledgments.
+            const cycles = evidenceWorkflow ? stagnantCycles(state) : 0;
+            if (evidenceWorkflow && cycles >= STAGNATION_HALT) {
+                const halted = await hard(event.context, state, "evidence-stagnation", {
+                    action: "halt",
+                    reason: `${cycles} successful compactions without new confirmed or refuted evidence; halting for owner review`,
+                    alternative: "Record new observed evidence for the current hypothesis or ask the owner to review the plan.",
+                });
+                return { decision: { ...halted, stagnantCycles: cycles }, retainedPolicyBlock: policy };
+            }
+            // The stagnation replan is audited BEFORE the registry save, so a failed
+            // audit leaves neither a published validation id nor a registry record.
+            let stagnation = null;
+            if (evidenceWorkflow && cycles >= STAGNATION_REPLAN) {
+                // A replan hold still carries the validation id: a host-confirmed success
+                // remains acknowledgeable, so the cycle counts and the halt stays reachable.
+                stagnation = await hard(event.context, state, "evidence-stagnation", {
+                    action: "replan",
+                    reason: `${cycles} successful compactions without new confirmed or refuted evidence; replan before compacting again`,
+                    alternative: "Gather new observed evidence for the current hypothesis before the next compaction.",
+                });
+                if (stagnation.status !== "ready")
+                    return { decision: stagnation, retainedPolicyBlock: policy };
+            }
+            let validationId;
+            if (mode === "enforce") {
+                if (signal?.aborted) // rechecked after every awaited audit, before the save
+                    return { decision: await audit(services, event.context, state, unavailable(mode, "validate-compaction", "Operation cancelled before durable recording")), retainedPolicyBlock: policy };
+                const record = {
+                    validationId: `v-${randomUUID().slice(0, 12)}`, host: event.context.host,
+                    projectHash: digest(event.context.projectRoot), sessionHash: digest(event.context.sessionId),
+                    requestHash: digest(event.context.requestId), mode, stateRevision: state.revision,
+                    candidateHash: compactionCandidateHash(event),
+                    ...(event.checkpoint ? { checkpointHash: checkpointHash(event.checkpoint) } : {}),
+                    createdAt: (services.now?.() ?? new Date()).toISOString(),
+                };
+                try {
+                    await registryFor(event.context).save(record);
+                }
+                catch {
+                    return { decision: await audit(services, event.context, state, unavailable(mode, "validate-compaction", "Compaction validation registry is unavailable")), retainedPolicyBlock: policy };
+                }
+                validationId = record.validationId;
+            }
+            if (stagnation)
+                return { decision: { ...stagnation, ...(validationId ? { validationId } : {}), stagnantCycles: cycles }, retainedPolicyBlock: policy };
+            result = { ...result, ...(validationId ? { validationId } : {}), ...(evidenceWorkflow ? { stagnantCycles: cycles } : {}) };
+            return { decision: result, retainedPolicyBlock: policy };
         },
         async acknowledgeCompaction(event) {
             const { state, failed } = await snapshot(event.context, "acknowledge-compaction");
             if (failed || !state)
                 return failed;
+            if (event.succeeded !== true)
+                return hard(event.context, state, "acknowledge-compaction", { action: "escalate", reason: "Only a successful compaction may be acknowledged" });
+            if (mode === "shadow")
+                return audit(services, event.context, state, {
+                    gateId: "acknowledge-compaction", mode, status: "ready", proposedAction: "none", appliedAction: "none",
+                    reason: "Shadow mode: compaction acknowledgment observed; no state changed", probabilities: {},
+                });
+            // Authenticate against the durable registry BEFORE any idempotent success:
+            // a compactionId present in state never bypasses validation provenance.
+            const registry = registryFor(event.context);
+            let found;
+            try {
+                found = await registry.get(event.validationId);
+            }
+            catch {
+                return unavailable(mode, "acknowledge-compaction", "Compaction validation registry is unavailable or corrupt");
+            }
+            if (!found)
+                return hard(event.context, state, "acknowledge-compaction", { action: "escalate", reason: "Unknown compaction validation id; a successful validation must precede acknowledgment" });
+            const { record, compactionId } = found;
+            if (record.host !== event.context.host || record.projectHash !== digest(event.context.projectRoot) ||
+                record.sessionHash !== digest(event.context.sessionId) || record.requestHash !== digest(event.context.requestId) ||
+                record.mode !== mode)
+                return hard(event.context, state, "acknowledge-compaction", { action: "escalate", reason: "Compaction validation belongs to a different project, session, request, or mode" });
+            // Verify the exact successful candidate when the adapter binds it.
+            if (event.candidateHash !== undefined && event.candidateHash !== record.candidateHash)
+                return hard(event.context, state, "acknowledge-compaction", { action: "escalate", reason: "Acknowledged candidate does not match the validated candidate" });
+            let checkpoint;
+            if (event.checkpoint !== undefined) {
+                try {
+                    checkpoint = validateCheckpoint(event.checkpoint);
+                }
+                catch {
+                    return hard(event.context, state, "acknowledge-compaction", { action: "escalate", reason: "Acknowledged checkpoint fails schema or privacy checks" });
+                }
+                if (!record.checkpointHash || checkpointHash(checkpoint) !== record.checkpointHash)
+                    return hard(event.context, state, "acknowledge-compaction", { action: "escalate", reason: "Acknowledged checkpoint was not part of the validated candidate" });
+            }
+            if (compactionId !== undefined && compactionId !== event.compactionId)
+                return hard(event.context, state, "acknowledge-compaction", { action: "escalate", reason: "Compaction validation was already consumed by a different compaction" });
+            // Durable state application shared by the first acknowledgment and retry
+            // recovery: ONE atomic compare-and-swap mutation carrying the merged
+            // validated checkpoint, the opt-in stagnation counter, and the durable
+            // application marker (checkpointAcks). Recovery is fail-closed: the
+            // registry binding never mutates project state, so a retry may apply only
+            // onto the exact revision the candidate was validated at; an unrelated
+            // later write turns the retry into an explicit stale escalation for
+            // revalidation instead of a stale-checkpoint overwrite. A replay whose
+            // marker is already recorded is a pure no-op, independent of how far the
+            // state advanced since.
+            const applyState = async (fresh) => {
+                if ((fresh.checkpointAcks ?? []).includes(event.validationId))
+                    return null;
+                if (fresh.revision !== record.stateRevision)
+                    return hard(event.context, fresh, "acknowledge-compaction", { action: "escalate", reason: "Compaction validation is stale; project state changed after the candidate was validated" });
+                const merged = checkpoint ? mergeCheckpoint(checkpoint, fresh.summary) : undefined;
+                return persist(event.context, fresh, { kind: "compaction-ack", compactionId: event.compactionId, validationId: event.validationId,
+                    ...(merged ? { checkpoint: merged } : {}), countEvidence: evidenceWorkflow }, "acknowledge-compaction");
+            };
+            if (compactionId === event.compactionId) {
+                // Idempotent retry: audit first, then recover an apply interrupted after
+                // the registry ack; a recorded application marker makes it a pure no-op.
+                const replay = await hard(event.context, state, "acknowledge-compaction", { action: "none", reason: "Already acknowledged this successful compaction" });
+                if (replay.status !== "ready")
+                    return replay;
+                const recovered = await applyState(state);
+                return recovered ?? replay;
+            }
+            if (record.stateRevision !== state.revision)
+                return hard(event.context, state, "acknowledge-compaction", { action: "escalate", reason: "Compaction validation is stale; project state changed after the candidate was validated" });
             if (state.compactionIds.includes(event.compactionId))
-                return hard(event.context, state, "acknowledge-compaction", { action: "none", reason: "Already acknowledged this successful compaction" });
-            // G9/G10 must verify the validation id before successful-cycle counters can advance.
-            return hard(event.context, state, "acknowledge-compaction", { action: "escalate", reason: "Compaction validation registry is not installed" });
+                return hard(event.context, state, "acknowledge-compaction", { action: "escalate", reason: "Compaction was already acknowledged under a different validation" });
+            if (registry.lookupCompaction) {
+                let bound;
+                try {
+                    bound = await registry.lookupCompaction(event.compactionId);
+                }
+                catch {
+                    return unavailable(mode, "acknowledge-compaction", "Compaction validation registry is unavailable or corrupt");
+                }
+                if (bound !== null)
+                    return hard(event.context, state, "acknowledge-compaction", { action: "escalate", reason: "Compaction was already acknowledged under a different validation" });
+            }
+            if (signal?.aborted)
+                return audit(services, event.context, state, unavailable(mode, "acknowledge-compaction", "Operation cancelled before durable recording"));
+            // Audit the decision BEFORE any registry or state mutation: a failed audit
+            // publishes no binding and moves no counter.
+            const approved = await hard(event.context, state, "acknowledge-compaction", {
+                action: "allow",
+                reason: evidenceWorkflow ? "Successful unique compaction acknowledged" : "Successful unique compaction acknowledged; evidence workflow is disabled, so stagnation counters are unchanged",
+            });
+            if (approved.status !== "ready")
+                return approved;
+            if (signal?.aborted)
+                return audit(services, event.context, state, unavailable(mode, "acknowledge-compaction", "Operation cancelled before durable recording"));
+            // Bind durably before advancing any counter so a retry can never count the
+            // same compaction twice; the registry also rejects a compactionId already
+            // bound to a different validationId (concurrent forgery).
+            try {
+                await registry.acknowledge(event.validationId, event.compactionId);
+            }
+            catch (error) {
+                const message = error instanceof Error ? error.message : String(error);
+                if (/different validation|different compaction/.test(message))
+                    return hard(event.context, state, "acknowledge-compaction", { action: "escalate", reason: message });
+                return unavailable(mode, "acknowledge-compaction", "Could not durably record the compaction acknowledgment");
+            }
+            const mutationError = await applyState(state);
+            if (mutationError)
+                return mutationError;
+            return { ...approved, recordedId: event.compactionId };
         },
     };
 }

@@ -100,6 +100,43 @@ test('dedup fanout is bounded, and incomplete coverage never claims a complete p
   assert.equal(fx.requests.length, 255);
   assert.ok(peak <= 8);
 });
+test('a pending duplicate is blocked with a prior reference; a setup failure is not compared', async () => {
+  const fx = fixtureServices({ initial: snapshot({ attempts: [
+    { id: 'a-setup', hypothesis: 'greeting works', method: 'npm test', result: 'setup_failure', evidenceIds: [], countsAsTrial: false },
+  ] }), reply: responseFor({ choice: { 'g7-dedup_relation': 'repeat' }, noul: { 'g7-dedup_difference_matters': 0.1 } }) });
+  const h = createHarness(fx.services, { mode: 'enforce' });
+  // The first registration is allowed and stays an uncounted pending attempt;
+  // the setup failure is excluded, so no comparison reaches the provider.
+  const first = await h.registerAttempt({ context: context(), hypothesis: 'greeting works', method: 'npm test' });
+  assert.equal(first.appliedAction, 'allow');
+  assert.equal(fx.requests.length, 0);
+  const pending = fx.getState().attempts.find(a => a.id === first.recordedId);
+  assert.equal(pending.result, 'inconclusive');
+  assert.equal(pending.countsAsTrial, false);
+  // An exact repeat of the pending attempt invokes G7 and is blocked, quoting the prior.
+  const repeat = await h.registerAttempt({ context: context(), hypothesis: 'greeting works', method: 'npm test' });
+  assert.equal(repeat.proposedAction, 'block');
+  assert.match(repeat.reason, new RegExp(pending.id));
+  assert.match(repeat.reason, /greeting works/);
+  assert.match(repeat.reason, /npm test/);
+  assert.equal(fx.requests.length, 1);
+  assert.deepEqual(repeat.coverage, { checked: 1, total: 1, complete: true });
+  // The refused repeat was never persisted, and no attempt was marked a trial to dedup.
+  assert.equal(fx.getState().attempts.length, 2);
+  assert.equal(fx.getState().attempts.filter(a => a.countsAsTrial).length, 0);
+});
+test('a materially changed variable is allowed against a pending duplicate', async () => {
+  const fx = fixtureServices({ initial: snapshot({ attempts: [
+    { id: 'a-pending', hypothesis: 'greeting works', method: 'npm test', result: 'inconclusive', evidenceIds: [], countsAsTrial: false },
+  ] }), reply: responseFor({ choice: { 'g7-dedup_relation': 'variant' }, noul: { 'g7-dedup_difference_matters': 0.9 } }) });
+  const h = createHarness(fx.services, { mode: 'enforce' });
+  const changed = await h.registerAttempt({ context: context(), hypothesis: 'greeting works', method: 'npm test', changedVariable: 'locale' });
+  assert.equal(changed.appliedAction, 'allow');
+  assert.ok(changed.recordedId);
+  assert.equal(fx.requests.length, 1);
+  const recorded = fx.getState().attempts.find(a => a.id === changed.recordedId);
+  assert.equal(recorded.countsAsTrial, false);
+});
 test('secret-bearing user instructions never leave the process or enter constraints', async () => {
   const fx = fixtureServices({ reply: responseFor() });
   const h = createHarness(fx.services, { mode: 'enforce' });

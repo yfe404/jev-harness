@@ -1,0 +1,20 @@
+# stop-and-explain
+goal: Refactor the greeting module.
+
+> user: "Stop — that is the wrong approach. Explain what you did and why."
+UserPromptSubmit → advisory (UserPromptSubmit): [jev-harness] Tool use is paused for this request. Reply in text only: acknowledge the correction, explain what you did and why, then wait for the next user message.
+request: req-<id>
+
+> agent tries to keep editing anyway
+PreToolUse(Edit) → DENY — Blocked: Tool use frozen by a user correction. Allowed alternative: Acknowledge the correction in text; wait for a new user request.. This block is final; do not work around it.
+
+> host Stop event fires (agent finished a turn)
+Stop → pass (exit 0, no output — action proceeds)
+> agent tries the edit again after Stop
+PreToolUse(Edit) → DENY — Blocked: Tool use frozen by a user correction. Allowed alternative: Acknowledge the correction in text; wait for a new user request.. This block is final; do not work around it.  (Stop never clears a freeze)
+
+> user sends a genuinely new request: "OK, continue with the greeting refactor"
+UserPromptSubmit → pass (exit 0, no output — action proceeds)
+request: req-<id>  (new accepted request released the freeze)
+> agent runs the tests
+PreToolUse(Bash) → pass (exit 0, no output — action proceeds)

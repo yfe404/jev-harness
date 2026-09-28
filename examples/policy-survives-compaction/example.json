@@ -1,0 +1,4 @@
+{
+  "name": "policy-survives-compaction",
+  "summary": "a public-API constraint is re-injected after compaction and still blocks a breaking edit"
+}

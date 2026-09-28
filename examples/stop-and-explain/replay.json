@@ -1,0 +1,9 @@
+{
+  "replies": [
+    { "gate": "g4-capture", "answers": { "kind": "feedback" } },
+    { "gate": "g5-stop", "when": "stop", "answers": { "stop_or_correct": 0.95 } },
+    { "gate": "g5-stop", "answers": { "stop_or_correct": 0.05 } },
+    { "gate": "g1-bash", "answers": { "effect": "reversible", "violates_constraint": 0.05 } },
+    { "gate": "g6-plan", "answers": { "violates": "none", "relation_to_goal": "direct" } }
+  ]
+}

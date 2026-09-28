@@ -118,6 +118,9 @@ export interface Decision {
   readonly recordedId?: string;
   /** Dedup comparisons may be capped; a partial search never claims complete coverage. */
   readonly coverage?: Readonly<{ checked: number; total: number; complete: boolean }>;
+  /** Trailing successful compaction cycles without new confirmed/refuted evidence;
+   * present only when the evidence workflow is enabled. */
+  readonly stagnantCycles?: number;
 }
 export interface ToolResultDecision {
   readonly decision: Decision;
@@ -161,6 +164,13 @@ export interface TypedCheckpoint {
   readonly inProgress: string;
   readonly nextAction: string;
 }
+/** One successful, unique compaction cycle. `evidence` is the target-evidence
+ * mark (hash of the confirmed/refuted evidence ids) at acknowledgment time;
+ * null means the cycle predates cycle tracking and never counts as stagnant. */
+export interface CompactionCycle {
+  readonly id: string;
+  readonly evidence: string | null;
+}
 export interface StateSnapshot {
   readonly revision: string;
   readonly goal: string;
@@ -170,14 +180,25 @@ export interface StateSnapshot {
   readonly summary: TypedCheckpoint | null;
   /** Successful, unique compaction acknowledgments only. */
   readonly compactionIds: readonly string[];
+  /** Cycle identity and target-evidence mark per acknowledged compaction, in
+   * acknowledgment order. Absent only for custom state services predating it. */
+  readonly compactionCycles?: readonly CompactionCycle[];
+  /** Validation ids whose checkpoint application completed durably. A replayed
+   * acknowledgment with a recorded marker must not republish its checkpoint. */
+  readonly checkpointAcks?: readonly string[];
 }
 export type StateMutation =
   | Readonly<{ kind: "constraint"; constraint: StandingConstraint }>
   | Readonly<{ kind: "attempt"; attempt: Attempt }>
   | Readonly<{ kind: "evidence"; evidence: Evidence }>
   | Readonly<{ kind: "attempt-result"; attemptId: string; result: TrialResult; evidenceIds: readonly string[] }>
-  | Readonly<{ kind: "checkpoint"; checkpoint: TypedCheckpoint }>
-  | Readonly<{ kind: "compaction-ack"; compactionId: string; validationId: string }>;
+  | Readonly<{ kind: "checkpoint"; checkpoint: TypedCheckpoint; appliedValidationId?: string }>
+  /** Atomic compaction application: appends the stagnation counter/cycle (unless
+   * countEvidence === false), publishes the merged validated checkpoint when
+   * supplied, and records the validationId in checkpointAcks — all in one
+   * compare-and-swap write, so an interrupted acknowledgment recovers as a
+   * single retry and a replayed one is a pure no-op. */
+  | Readonly<{ kind: "compaction-ack"; compactionId: string; validationId: string; checkpoint?: TypedCheckpoint; countEvidence?: boolean }>;
 
 export interface RegisterAttemptEvent {
   readonly context: EventContext;
@@ -218,6 +239,43 @@ export interface CompactionAcknowledgmentEvent {
   readonly compactionId: string;
   readonly validationId: string;
   readonly succeeded: true;
+  /** compactionCandidateHash of the exact validated candidate; verified against
+   * the registry record when supplied. */
+  readonly candidateHash?: string;
+  /** The exact checkpoint accepted at validation; persisted only when it matches
+   * the recorded checkpointHash. Never invented from prose. */
+  readonly checkpoint?: TypedCheckpoint;
+}
+
+/** Durable record binding one validated compaction candidate to its provenance.
+ * Contains hashes only; candidate prose is never stored in the registry. */
+export interface CompactionValidationRecord {
+  readonly validationId: string;
+  readonly host: Host;
+  readonly projectHash: string;
+  readonly sessionHash: string;
+  readonly requestHash: string;
+  readonly mode: Mode;
+  /** State revision the candidate was judged against; an ack after a change is stale. */
+  readonly stateRevision: string;
+  /** Hash of the exact candidate summary/note/checkpoint bytes. */
+  readonly candidateHash: string;
+  /** Hash of the validated typed checkpoint alone, when one was supplied. The
+   * checkpoint itself is never stored; an ack must resend it for persistence. */
+  readonly checkpointHash?: string;
+  readonly createdAt: string;
+}
+export interface CompactionRegistry {
+  /** Persist a new validation record durably; a duplicate validationId is an error. */
+  save(record: CompactionValidationRecord): Promise<void>;
+  /** Folded record plus its acknowledged compactionId, or null when unknown. */
+  get(validationId: string): Promise<Readonly<{ record: CompactionValidationRecord; compactionId?: string }> | null>;
+  /** Bind one compactionId. Repeating the same compactionId is an idempotent retry;
+   * a different compactionId for the same validationId throws, as does a
+   * compactionId already bound to a different validationId. */
+  acknowledge(validationId: string, compactionId: string): Promise<void>;
+  /** Reverse binding lookup: the validationId bound to a compactionId, or null. */
+  lookupCompaction?(compactionId: string): Promise<string | null>;
 }
 
 export interface ProviderRequest {
@@ -267,11 +325,19 @@ export interface HarnessServices {
   readonly audit: AuditService;
   /** Optional injected request lock service; defaults to session-scoped local files. */
   readonly runtime?: RuntimeService;
+  /** Optional injected compaction validation registry; defaults to durable files under
+   * the project's ignored `.harness/runtime/` directory. */
+  readonly compactionRegistry?: CompactionRegistry;
   readonly now?: () => Date;
 }
 export interface HarnessOptions {
   readonly mode?: Mode; // default: shadow, including initialized projects
   readonly signal?: AbortSignal;
+  /** Opt-in experiment/evidence workflow. Only when true does a unique successful
+   * compaction acknowledgment advance the durable compaction counter used for
+   * evidence-stagnation tracking. Default false: acknowledgments are still
+   * validated, deduplicated, and audited, but counters never move. */
+  readonly evidenceWorkflow?: boolean;
 }
 export interface Harness {
   /** Call after host acceptance, before onUserInput; only call onUserInput if fresh=true. */
