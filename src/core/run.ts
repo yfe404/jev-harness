@@ -19,6 +19,7 @@ import { g9Drift } from "./gates/g9-drift.js";
 import { g10Fidelity } from "./gates/g10-fidelity.js";
 import { buildRetainedPolicyBlock, checkpointHash, compactionCandidateHash, mergeCheckpoint, stagnantCycles, STAGNATION_HALT, STAGNATION_REPLAN } from "./compaction.js";
 import { finalBlock, needsOwner } from "./messages.js";
+import { providerFailureReason } from "./client.js";
 import { containsKnownSecret, isPrivatePath, redactText, redactValue } from "./redact.js";
 import { digest } from "./report.js";
 import { classifyWritePath, canSendFileToJev } from "./state/files.js";
@@ -34,7 +35,11 @@ function inert(mode: Mode, gateId: string): Decision {
 }
 function unavailable(mode: Mode, gateId: string, reason: string): Decision {
   return { gateId, mode, status: "unavailable", proposedAction: "escalate", appliedAction: mode === "enforce" ? "escalate" : "allow",
-    reason, probabilities: {}, alternative: needsOwner(reason) };
+    reason, probabilities: {},
+    // Shadow is observation-only: never emit owner wait/pause directives.
+    alternative: mode === "shadow"
+      ? `Observation only; no action applied. In enforce mode the owner would be asked about: ${redactText(reason)}`
+      : needsOwner(reason) };
 }
 function decision(mode: Mode, gateId: string, verdict: GateVerdict, answers: ValidatedAnswers = {}): Decision {
   const p: Record<string, number> = {};
@@ -44,11 +49,24 @@ function decision(mode: Mode, gateId: string, verdict: GateVerdict, answers: Val
   }
   const reason = redactText(verdict.reason);
   const alternative = verdict.alternative ?? "Ask the owner for an approved approach or use a reversible project-local alternative.";
+  const blocking = ["block", "halt", "freeze"].includes(verdict.action);
   return {
     gateId, mode, proposedAction: verdict.action, appliedAction: mode === "enforce" ? verdict.action : "allow",
     status: verdict.action === "escalate" ? "escalation" : "ready",
-    reason: ["block", "halt", "freeze"].includes(verdict.action) ? finalBlock(reason, alternative) : reason,
-    probabilities: p, ...(["block", "halt", "freeze", "escalate"].includes(verdict.action) ? { alternative: redactText(alternative) } : {}),
+    // Shadow labels a proposed block as an observation; the finality and
+    // anti-workaround wording of finalBlock is enforce-mode only.
+    reason: blocking
+      ? mode === "shadow"
+        ? `Shadow observation only (no action applied): would ${verdict.action} — ${reason}.`
+        : finalBlock(reason, alternative)
+      : reason,
+    probabilities: p, ...(["block", "halt", "freeze", "escalate"].includes(verdict.action)
+      // The enforce alternative can carry imperatives ("reply in text, wait for
+      // a new request"); shadow gets a declarative note instead.
+      ? { alternative: mode === "shadow"
+        ? `In enforce mode this gate would ${verdict.action}; no action is applied while observing.`
+        : redactText(alternative) }
+      : {}),
   };
 }
 
@@ -132,8 +150,10 @@ export async function runBatchedGates<Input>(
     try {
       const raw = await services.provider.decide(request, signal);
       validated = validateAnswers(request.questions, raw);
-    } catch {
-      await failAll(batch.map(e => e.item), "Jev verdict is unavailable or invalid");
+    } catch (error) {
+      // Only structured provider failures get a specific reason; arbitrary
+      // caught messages may echo attacker-controlled text or credentials.
+      await failAll(batch.map(e => e.item), providerFailureReason(error));
       continue;
     }
     for (const { item: { gate, input, query } } of batch) {
@@ -143,7 +163,7 @@ export async function runBatchedGates<Input>(
         const minConfidence = gate.thresholds.human ?? 0.5;
         const uncertain = Object.values(answers).some(answer => answer.confidence < minConfidence);
         const verdict = uncertain
-          ? { action: "escalate" as const, reason: "Jev answer confidence below the gate's human threshold" }
+          ? { action: "escalate" as const, reason: uncertaintyReason(gate.id, answers, minConfidence) }
           : gate.evaluate(input, answers, state);
         let result = decision(mode, gate.id, verdict, answers);
         if (gate.id === g3Result.id && !(input as ToolResultEvent).canReplaceOutput && result.appliedAction === "redact") {
@@ -156,6 +176,22 @@ export async function runBatchedGates<Input>(
     }
   }
   return results;
+}
+
+/**
+ * Human-readable uncertainty reason: names what Jev could not establish for
+ * the specific gate instead of referencing an internal confidence threshold.
+ */
+function uncertaintyReason(gateId: string, answers: Record<string, ValidatedAnswers[string]>, minConfidence: number): string {
+  if (gateId === "g6-plan") {
+    const parts: string[] = [];
+    if (answers.relation_to_goal !== undefined && answers.relation_to_goal.confidence < minConfidence)
+      parts.push("Jev is unsure how this action supports the project goal");
+    if (answers.violates !== undefined && answers.violates.confidence < minConfidence)
+      parts.push("Jev is unsure whether this action follows the standing project rules");
+    if (parts.length) return parts.join("; ");
+  }
+  return "Jev could not establish enough confidence in its answers to clear this action";
 }
 
 function mostSevere(decisions: readonly Decision[], mode: Mode): Decision {

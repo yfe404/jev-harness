@@ -50,7 +50,7 @@ function host({ mode = 'enforce', reply, initialized = true, constraints = [], t
     sessionManager: { getSessionId: () => 'sess-1', getBranch: () => [...branch, ...appendedEntries] },
     ui: {
       notify: (message, type) => notifications.push({ message, type }),
-      confirm: ui ? (async () => confirmResult) : undefined,
+      confirm: async () => { throw new Error('ui.confirm must never be called: blocks go to the agent, not the owner'); },
       setStatus: () => {},
     },
   };
@@ -229,23 +229,47 @@ test('freeze also blocks harness tools and exempted self-compact tools: no model
   assert.match(executed.content[0].text, /frozen by a user correction/);
 });
 
-test('unknown tool intent blocks without a UI and confirms with one', async () => {
-  const nonInteractive = host({ ui: false });
-  await nonInteractive.emit('session_start', { reason: 'startup' });
-  await nonInteractive.prompt('ordinary task');
-  const denied = await nonInteractive.emit('tool_call', toolCall('some_mcp_tool', {}));
-  assert.equal(denied.block, true);
-  assert.match(denied.reason, /cannot prompt|confirmation/i);
+test('unknown tool intent returns an agent-facing block in interactive and non-interactive sessions', async () => {
+  for (const ui of [false, true]) {
+    const h = host({ ui });
+    await h.emit('session_start', { reason: 'startup' });
+    await h.prompt('ordinary task');
+    const denied = await h.emit('tool_call', toolCall('some_mcp_tool', {}));
+    assert.equal(denied.block, true, 'unrecognized intent is blocked back to the agent, never an owner popup');
+    assert.match(denied.reason, /some_mcp_tool was not executed/);
+    assert.match(denied.reason, /does not recognize this tool's intent/);
+    assert.doesNotMatch(denied.reason, /owner|confirm|yes/i);
+  }
+});
 
-  const interactiveDecline = host({ ui: true, confirmResult: false });
-  await interactiveDecline.emit('session_start', { reason: 'startup' });
-  await interactiveDecline.prompt('ordinary task');
-  assert.equal((await interactiveDecline.emit('tool_call', toolCall('some_mcp_tool', {}))).block, true);
-
-  const interactiveAccept = host({ ui: true, confirmResult: true });
-  await interactiveAccept.emit('session_start', { reason: 'startup' });
-  await interactiveAccept.prompt('ordinary task');
-  assert.equal(await interactiveAccept.emit('tool_call', toolCall('some_mcp_tool', {})), undefined);
+test('a preflight unavailable/escalation is an agent-facing block naming the action and cause, never a modal, with or without a UI', async () => {
+  for (const ui of [false, true]) {
+    for (const status of ['unavailable', 'escalation']) {
+      const h = host({
+        ui,
+        wrapHarness: harness => ({
+          ...harness,
+          onToolPreflight: async () => ({
+            gateId: 'g6-plan', mode: 'enforce', status,
+            proposedAction: 'escalate', appliedAction: 'escalate',
+            reason: status === 'unavailable'
+              ? 'Jev request timed out'
+              : 'Jev is unsure how this action supports the project goal',
+            probabilities: {},
+          }),
+        }),
+      });
+      await h.emit('session_start', { reason: 'startup' });
+      await h.prompt('write the notes');
+      const blocked = await h.emit('tool_call', toolCall('write', { path: 'note.md', content: 'x' }));
+      assert.equal(blocked.block, true, `${status} in enforce blocks the tool (ui=${ui})`);
+      assert.match(blocked.reason, /note\.md/, 'the block names the exact action');
+      assert.match(blocked.reason, /was not executed/);
+      assert.match(blocked.reason, status === 'unavailable' ? /timed out/ : /unsure how this action supports the project goal/,
+        'the block carries the actual cause');
+      // host ctx.ui.confirm throws if called: reaching here proves no modal.
+    }
+  }
 });
 
 test('tool_result withholds secret output and never records withheld content as evidence', async () => {
@@ -311,6 +335,7 @@ test('context hook restores canonical policy once and reports active holds', asy
   assert.equal(policy.length, 1);
   assert.match(policy[0].content, /Goal: Make the sample app greet the user\./);
   assert.match(policy[0].content, /c-001.*Do not add new dependencies/);
+  assert.match(policy[0].content, /Mode: enforce/, 'the banner names the current mode');
 
   // Re-application deduplicates the earlier block (native/overflow continuation).
   const second = await h.emit('context', { messages: first.messages });
@@ -621,4 +646,13 @@ test('a freeze persisted under the same session is ignored in shadow mode', asyn
   const policy = ctxResult.messages.find(m => m.customType === 'jev-harness-policy');
   assert.ok(policy, 'shadow still restores canonical policy');
   assert.doesNotMatch(policy.content, /Active hold/, 'shadow never injects blocking semantics');
+  // The banner names the CURRENT mode so a leftover hold narrative from an
+  // earlier enforce conversation is superseded after reload into shadow.
+  assert.match(policy.content, /Mode: shadow \(observation only\)/);
+  assert.match(policy.content, /blocks no tools and applies no freezes or holds/);
+  assert.match(policy.content, /superseded/);
+  assert.equal(ctxResult.messages.filter(m => m.customType === 'jev-harness-policy').length, 1, 'no duplicate banner');
+  // The old persisted freeze is still intact for the enforce session: shadow
+  // only ignores it; it never clears it.
+  assert.equal((await sharedRuntime.get({ host: 'pi', projectRoot: '/example', sessionId: 'sess-1', requestId: 'request-1', trusted: true })).frozen, true);
 });

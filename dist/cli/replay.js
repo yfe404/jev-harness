@@ -27,13 +27,13 @@ export function createReplayProvider(rules) {
                 const haystack = JSON.stringify(states[gate] ?? "").toLowerCase();
                 const rule = rules.find(r => r.gate === gate && matches(r.when, haystack));
                 if (!rule)
-                    throw new ProviderUnavailableError(`No recorded reply for ${gate}`);
+                    throw new ProviderUnavailableError("invalid-response", `No recorded reply for ${gate}`);
                 for (const [key, question] of Object.entries(request.questions)) {
                     if (!key.startsWith(`${gate}_`))
                         continue;
                     const name = key.slice(gate.length + 1);
                     if (!Object.hasOwn(rule.answers, name))
-                        throw new ProviderUnavailableError(`Recorded reply for ${gate} lacks ${name}`);
+                        throw new ProviderUnavailableError("invalid-response", `Recorded reply for ${gate} lacks ${name}`);
                     answers[key] = expand(question, rule.answers[name]);
                 }
             }
@@ -59,7 +59,7 @@ function expand(question, value) {
         return value;
     if (question.type === "noul") {
         if (typeof value !== "number")
-            throw new ProviderUnavailableError("Replay noul answer must be a number");
+            throw new ProviderUnavailableError("invalid-response", "Replay noul answer must be a number");
         return { type: "noul", noul: value };
     }
     if (question.type === "choice") {
@@ -80,11 +80,11 @@ function expand(question, value) {
             }
         }
         if (!label || !labels.includes(label))
-            throw new ProviderUnavailableError("Replay choice answer does not match an option");
+            throw new ProviderUnavailableError("invalid-response", "Replay choice answer does not match an option");
         return { type: "choice", choice: label, confidence: p, probabilities: spread(labels, label, p) };
     }
     if (typeof value !== "number" || !Number.isInteger(value))
-        throw new ProviderUnavailableError("Replay score answer must be a level index");
+        throw new ProviderUnavailableError("invalid-response", "Replay score answer must be a level index");
     const labels = question.criteria.map((_, index) => String(index));
     return { type: "score", score: value, confidence: 0.9, probabilities: spread(labels, String(value), 0.9) };
 }

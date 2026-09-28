@@ -128,6 +128,18 @@ const errorText = (error: unknown): string =>
 /** Canonical retained policy (goal, standing rules, preserved decisions). When
  * the block exceeds the injection limit the view says so explicitly; a
  * truncated policy never claims complete retention. */
+/**
+ * Safe bounded action identifier for agent-facing block reasons: tool name
+ * plus a redacted command or path where appropriate, never raw unknown input
+ * or file contents.
+ */
+function actionIdentifier(toolName: string, input: unknown): string {
+  const record = (input ?? {}) as Record<string, unknown>;
+  if (typeof record.command === "string") return `${toolName} ${redactText(record.command).replace(/[\n\r\0]+/g, " ").slice(0, 120)}`;
+  if (typeof record.path === "string") return `${toolName} ${record.path.slice(0, 120)}`;
+  return toolName;
+}
+
 function policyBlock(state: StateSnapshot, limit: number): string {
   const block = buildRetainedPolicyBlock(state);
   if (block.length <= limit) return block;
@@ -464,14 +476,17 @@ export function createPiHarnessExtension(options: PiHarnessOptions): (pi: PiExte
           return { block: true, reason: oneLine(decision.reason) };
         case "escalate":
         case "confirm": {
-          // Explicit noninteractive blocking: without a UI, escalate denies.
-          if (ctx.hasUI && ctx.ui.confirm) {
-            let ok = false;
-            try { ok = await ctx.ui.confirm("jev-harness needs owner confirmation", oneLine(decision.reason)); } catch { ok = false; }
-            if (ok) return undefined;
-            return { block: true, reason: `Owner declined: ${oneLine(decision.reason)}` };
+          // Explicit owner contract: the block goes back to the AGENT as a
+          // tool error, never to a human modal. No UI confirm, no owner
+          // override, no auto-approve — the action is simply not executed.
+          const actionLabel = actionIdentifier(event.toolName, event.input);
+          if (decision.status === "unavailable") {
+            return { block: true, reason: `${actionLabel} was not executed: jev-harness could not obtain a Jev verdict (${oneLine(decision.reason)}). The action cannot be checked safely right now; do not bypass this check with another tool.` };
           }
-          return { block: true, reason: `Owner confirmation required but this session cannot prompt: ${oneLine(decision.reason)}` };
+          const reasonText = decision.gateId === "tool-preflight"
+            ? "jev-harness does not recognize this tool's intent, so the action cannot be checked against the project gates"
+            : oneLine(decision.reason);
+          return { block: true, reason: `${actionLabel} was not executed: ${reasonText}. Provide a compliant plan before trying the action again; do not bypass this check with another tool.` };
         }
         default:
           return undefined;
@@ -548,7 +563,12 @@ export function createPiHarnessExtension(options: PiHarnessOptions): (pi: PiExte
       }
       const context = contextFor(ctx, requestId());
       if (!context.trusted) return undefined;
-      const lines: string[] = [];
+      // Always name the CURRENT session mode first: after a switch from
+      // enforce to shadow, earlier conversation text describing a hold must be
+      // superseded by the authoritative banner, not left as the last word.
+      const lines: string[] = [s.mode === "shadow"
+        ? "Mode: shadow (observation only) — jev-harness blocks no tools and applies no freezes or holds in this mode; any earlier conversation text describing an active harness hold is superseded."
+        : "Mode: enforce — jev-harness gates may block tool calls; any active holds are listed below."];
       let state: StateSnapshot | null = null;
       let stateError: string | null = s.stateError ?? null;
       try { state = await readState(s.projectRoot); }

@@ -45,9 +45,11 @@ Mode resolution mirrors the CLI, per session, at the nearest directory holding a
 
 Provider credentials come from the environment (`TYPESAFE_API_KEY`, or `OPENROUTER_API_KEY` for the OpenRouter transport), exactly as for the CLI. They are never read at load time, only when a gated decision actually runs.
 
+Provider requests are bounded by a timeout: `JH_TIMEOUT_MS` (milliseconds, default `15000`, valid range `1..60000`; an out-of-range value is rejected). An explicit `timeoutMs` API option wins over the environment variable. A timed-out request fails closed — the gate resolves to unavailable/escalate in enforce — and is never retried automatically.
+
 ## What the adapter does in a session
 
-- **Built-in tool gating.** Pi's `bash`/`read`/`grep`/`find`/`ls`/`write`/`edit` map onto harness intents and are preflighted (shell effects, write targets, plan review). A tool with an **unknown intent** (any other tool name, e.g. MCP tools) escalates: with an interactive UI the owner is asked to confirm; in non-interactive sessions it is denied. Unknown tools are never silently allowed.
+- **Built-in tool gating.** Pi's `bash`/`read`/`grep`/`find`/`ls`/`write`/`edit` map onto harness intents and are preflighted (shell effects, write targets, plan review). A tool with an **unknown intent** (any other tool name, e.g. MCP tools) escalates and is blocked back to the agent as a tool error, in interactive and non-interactive sessions alike. There are no owner confirmation dialogs and no auto-override: every uncertain, unknown, or unavailable gate outcome is an agent-facing block. Unknown tools are never silently allowed.
 - **Result screening.** `tool_result` output is screened before the model sees it; recognized credentials are withheld and injected (instruction-bearing) output is wrapped as untrusted. Screening knows a fixed set of secret shapes — a secret form it does not recognize is not detected, so treat screening as a seatbelt, not a vault.
 - **Correction freezes.** A user "stop / wrong approach" freezes all tools in enforce. The freeze is released only by the next authentic, actually-delivered user request (see lifecycle below) — never by `turn_end`, `agent_end`, `agent_settled`, reload, or an extension message.
 - **Canonical policy restoration.** Before every model call the `context` hook injects the authoritative policy from `.harness/` (goal, standing rules, preserved decisions) so self-compact, native/manual compaction, overflow continuation, and branch navigation can never leave the agent without current rules. If the policy exceeds the injection budget the block says so explicitly (treat omitted rules as unknown, never absent) instead of claiming complete retention.
@@ -104,6 +106,12 @@ bridge.onCompactionAck       // every ack decision; non-ready (or a throw surfac
 ```
 
 A wrapper that validates compaction candidates must persist, under the compaction entry's `details.jevHarness`: `validationId`, the validating `requestId`, `candidateHash` computed with the exported `compactionCandidateHash` over `{ summaryText, noteToSelf, checkpoint }`, the exact `noteToSelf` bytes, and the exact `checkpoint` when one was validated. Enforce wrappers must require a `validationId` before accepting a candidate, and must treat a non-ready `onCompactionAck` (including the synthetic `unavailable` decision emitted when the ack throws) as a continuation hold.
+
+## Troubleshooting
+
+- **Every decision is `unavailable` with a reason naming `TYPESAFE_API_KEY` or `OPENROUTER_API_KEY`.** The provider key never reached the Pi process (booleans like "the variable exists somewhere" do not count — the *Pi process environment* must contain it). Export the key in the shell that launches Pi (`export TYPESAFE_API_KEY=...` or `export OPENROUTER_API_KEY=...`) and start a new Pi session. No provider request is sent while the key is missing; the failure is classified locally in under a millisecond, which is the tell.
+- **Mode is resolved once per session, at `session_start`.** Switching `JH_MODE`/`.harness/config.json` applies to a new Pi session (or a full `/reload` that re-runs `session_start`), not mid-turn. The canonical context banner names the current mode explicitly; in shadow it states that observation is active and no harness tool hold applies, superseding any hold narrative left over from an earlier enforce conversation.
+- **Shadow mode is not a workaround for a policy decision.** Shadow only changes what the harness itself applies; it never asks you to disable safeguards that live outside the harness (owner approvals, sandboxing, your own review). Treat a shadow "would block" observation as a real judgment to act on, not as noise.
 
 ## Honest limitations
 

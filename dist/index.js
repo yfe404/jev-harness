@@ -1,6 +1,6 @@
 export { createHarness } from "./core/harness.js";
 export { validateAnswers } from "./core/answers.js";
-export { createJevClient, ProviderUnavailableError } from "./core/client.js";
+export { createJevClient, ProviderUnavailableError, providerFailureReason } from "./core/client.js";
 export { createFileStateService, initializeProject, readProject, classifyWritePath, canSendFileToJev } from "./core/state/files.js";
 export { createFileRuntimeService, getRequestState, acceptNewUserRequest, freezeRequest, clearRequestFreeze, markPlanReviewed } from "./core/state/locks.js";
 export { createFileAuditService, loadAudit, replayVerdict } from "./core/report.js";
