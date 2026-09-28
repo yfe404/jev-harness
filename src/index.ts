@@ -1,0 +1,12 @@
+export { createHarness } from "./core/harness.js";
+export { validateAnswers } from "./core/answers.js";
+export type {
+  Action, AuditEntry, AuditService, Attempt, CheckClaimEvent, ChoiceQuestion,
+  CompactionAcknowledgmentEvent, CompactionDecision, CompactionValidationEvent,
+  Decision, DecisionProvider, DecisionStatus, EventContext, Evidence, GateDefinition,
+  GateQuery, GateVerdict, Harness, HarnessOptions, HarnessServices, Host, Mode,
+  NoulQuestion, ProviderRequest, Question, QuestionMap, RecordEvidenceEvent,
+  RegisterAttemptEvent, ScoreQuestion, StandingConstraint, StateMutation,
+  StateService, StateSnapshot, ToolPreflightEvent, ToolResultDecision, ToolResultEvent,
+  TrialResult, TypedCheckpoint, UserInputEvent, ValidatedAnswer, ValidatedAnswers,
+} from "./core/contracts.js";

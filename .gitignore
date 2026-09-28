@@ -1,0 +1,9 @@
+node_modules/
+coverage/
+*.tsbuildinfo
+/.harness/runtime/
+/.harness/audit/
+/.harness/*.lock
+.env
+.env.*
+!.env.example

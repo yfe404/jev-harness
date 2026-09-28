@@ -1,0 +1,41 @@
+{
+  "name": "jev-harness",
+  "version": "0.1.0",
+  "description": "Auditable Jev decision gates for coding-agent workflows",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "bin": {
+    "jh": "./dist/cli.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./core/contracts": {
+      "types": "./dist/core/contracts.d.ts",
+      "default": "./dist/core/contracts.js"
+    },
+    "./pi": {
+      "types": "./dist/adapters/pi/index.d.ts",
+      "default": "./dist/adapters/pi/index.js"
+    }
+  },
+  "pi": {
+    "extensions": ["./dist/adapters/pi/index.js"]
+  },
+  "files": ["dist/", "LICENSE", "README.md", "docs/"],
+  "scripts": {
+    "build": "tsc --project tsconfig.json",
+    "typecheck": "tsc --project tsconfig.json --noEmit",
+    "test": "npm run build && node --test test",
+    "check": "npm run typecheck && npm test"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "~5.9.3"
+  }
+}
