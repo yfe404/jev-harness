@@ -1,0 +1,8 @@
+{
+  "hook_event_name": "SessionStart",
+  "session_id": "fixture-session",
+  "transcript_path": "/tmp/transcript.jsonl",
+  "cwd": "/example",
+  "permission_mode": "default",
+  "source": "compact"
+}
