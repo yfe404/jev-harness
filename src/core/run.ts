@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type {
-  Action, AuditEntry, CheckClaimEvent, CompactionValidationEvent, Decision, EventContext,
+  AcceptedUserRequestEvent, AcceptedUserRequestTransition, Action, AuditEntry, CheckClaimEvent, CompactionValidationEvent, Decision, EventContext,
   GateDefinition, GateVerdict, Harness, HarnessOptions, HarnessServices, Mode, QuestionMap,
   RecordEvidenceEvent, RegisterAttemptEvent, StateSnapshot, ToolPreflightEvent, ToolResultEvent,
   UserInputEvent, ValidatedAnswers,
@@ -143,6 +143,31 @@ export function createHarness(services: HarnessServices, options: HarnessOptions
   }
 
   return {
+    async acceptUserRequest(event: AcceptedUserRequestEvent): Promise<AcceptedUserRequestTransition> {
+      const { state, failed } = await snapshot(event.context, "request-transition");
+      if (failed || !state) return { decision: failed!, fresh: false, releasedPriorFreeze: false };
+      if (event.source !== "user" || event.accepted !== true) {
+        const denied = await audit(services, event.context, state,
+          unavailable(mode, "request-transition", "Only an accepted authentic user request may advance correction state"));
+        return { decision: denied, fresh: false, releasedPriorFreeze: false };
+      }
+      const proposed: Decision = {
+        gateId: "request-transition", mode, status: "ready", proposedAction: "allow",
+        appliedAction: mode === "enforce" ? "allow" : "none", probabilities: {},
+        reason: "Authenticated request accepted by host",
+      };
+      const logged = await audit(services, event.context, state, proposed);
+      if (logged.status !== "ready" || mode === "shadow")
+        return { decision: logged, fresh: mode === "shadow", releasedPriorFreeze: false };
+      try {
+        const result = await runtime.accept(event.context);
+        return { decision: logged, ...result };
+      } catch {
+        const denied = await audit(services, event.context, state,
+          unavailable(mode, "request-transition", "Accepted request state is unavailable"));
+        return { decision: denied, fresh: false, releasedPriorFreeze: false };
+      }
+    },
     async onUserInput(event: UserInputEvent): Promise<Decision> {
       const { state, failed } = await snapshot(event.context, "user-input");
       if (failed || !state) return failed!;
@@ -209,10 +234,14 @@ export function createHarness(services: HarnessServices, options: HarnessOptions
       const gates: NamedGate<ToolPreflightEvent>[] = [];
       if (event.intent === "shell") gates.push({ gate: g1Bash, input: event });
       if (event.intent === "write" || event.intent === "edit") gates.push({ gate: g2Write, input: event });
-      if (!request.planReviewed) gates.push({ gate: g6Plan, input: event });
+      // The first action is not a blanket approval: review every later file change
+      // and shell command. Shell effects (including long-lived actions) cannot be
+      // identified reliably by command-name or string matching alone.
+      if (!request.planReviewed || event.intent === "write" || event.intent === "edit" || event.intent === "shell")
+        gates.push({ gate: g6Plan, input: event });
       const decisions = await runBatchedGates(gates, event.context, state, services, mode, signal);
       const result = mostSevere(decisions, mode);
-      if (!request.planReviewed && ["allow", "none"].includes(result.appliedAction) && decisions.every(d => d.status === "ready")) {
+      if (mode === "enforce" && !request.planReviewed && ["allow", "none"].includes(result.appliedAction) && decisions.every(d => d.status === "ready")) {
         try { await runtime.markPlanReviewed(event.context); } catch { return unavailable(mode, "g6-plan", "Cannot persist plan review state"); }
       }
       return result;

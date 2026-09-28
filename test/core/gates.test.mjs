@@ -7,7 +7,7 @@ import { responseFor } from '../support/jev-replies.mjs';
 
 const tool = (overrides = {}) => ({ context: context(), callId: 'call-1', toolName: 'bash', intent: 'shell', input: { command: 'npm test' }, ...overrides });
 
-test('one batched provider request covers shell and first-action planning; later action skips plan', async () => {
+test('one batched provider request covers shell and planning on first and later actions', async () => {
   const fx = fixtureServices({ reply: responseFor() });
   const h = createHarness(fx.services, { mode: 'enforce' });
   const result = await h.onToolPreflight(tool());
@@ -17,7 +17,7 @@ test('one batched provider request covers shell and first-action planning; later
   assert.equal(fx.auditEntries.length, 2);
   await h.onToolPreflight(tool({ callId: 'call-2' }));
   assert.equal(fx.requests.length, 2);
-  assert.deepEqual(Object.keys(fx.requests[1].questions).sort(), ['g1-bash_effect', 'g1-bash_violates_constraint']);
+  assert.deepEqual(Object.keys(fx.requests[1].questions).sort(), ['g1-bash_effect', 'g1-bash_violates_constraint', 'g6-plan_relation_to_goal', 'g6-plan_violates']);
   assert.equal(replayVerdict(g1Bash, tool(), fx.getState(), fx.auditEntries[0].answers, fx.auditEntries[0].decision), true);
 });
 test('offline replay recomputes a recorded block without another provider call', async () => {
@@ -55,7 +55,9 @@ test('authenticated correction freezes all tools for one request, not the next',
   assert.equal(fx.getState().constraints.length, 1);
   const pending = await h.onToolPreflight(tool({ context: context({ requestId: 'request-2' }) }));
   assert.equal(pending.appliedAction, 'block');
-  fx.clearFreeze(context());
+  const accepted = await h.acceptUserRequest({ context: context({ requestId: 'request-2' }), source: 'user', accepted: true });
+  assert.equal(accepted.fresh, true);
+  assert.equal(accepted.releasedPriorFreeze, true);
   const newRequest = await h.onToolPreflight(tool({ context: context({ requestId: 'request-2' }) }));
   assert.equal(newRequest.appliedAction, 'allow');
 });

@@ -1,7 +1,9 @@
 import { createHash, randomUUID } from "node:crypto";
 import { lstat, mkdir, open, readFile, rename, unlink, realpath } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 const initial = { frozen: false, planReviewed: false };
+const MAX_ACCEPTED = 1024;
+const isHash = (value) => typeof value === "string" && /^[0-9a-f]{64}$/.test(value);
 function key(ctx) {
     return createHash("sha256").update(JSON.stringify([ctx.host, ctx.projectRoot, ctx.sessionId, ctx.requestId])).digest("hex");
 }
@@ -9,7 +11,7 @@ function sessionKey(ctx) {
     return createHash("sha256").update(JSON.stringify([ctx.host, ctx.projectRoot, ctx.sessionId])).digest("hex");
 }
 function ownerKey(ctx) { return createHash("sha256").update(ctx.requestId).digest("hex"); }
-async function runtime(ctx) {
+async function runtime(ctx, create = true) {
     if (!ctx.trusted)
         throw new Error("Untrusted project cannot create runtime state");
     const root = await realpath(ctx.projectRoot);
@@ -18,22 +20,30 @@ async function runtime(ctx) {
     if (!stat.isDirectory() || stat.isSymbolicLink())
         throw new Error("Project is not initialized");
     const path = join(dir, "runtime");
-    try {
-        await mkdir(path, { mode: 0o700 });
+    if (create) {
+        try {
+            await mkdir(path, { mode: 0o700 });
+        }
+        catch (error) {
+            if (error.code !== "EEXIST")
+                throw error;
+        }
     }
-    catch (error) {
-        if (error.code !== "EEXIST")
-            throw error;
+    try {
         const info = await lstat(path);
         if (!info.isDirectory() || info.isSymbolicLink())
             throw new Error("Unsafe runtime directory");
+    }
+    catch (error) {
+        if (create || error.code !== "ENOENT")
+            throw error;
     }
     return path;
 }
 async function readOwnRequestState(ctx) {
     if (!ctx.trusted)
         return initial;
-    const path = join(await runtime(ctx), `${key(ctx)}.json`);
+    const path = join(await runtime(ctx, false), `${key(ctx)}.json`);
     try {
         const info = await lstat(path);
         if (!info.isFile() || info.isSymbolicLink() || info.size > 1024)
@@ -54,21 +64,8 @@ export async function getRequestState(ctx) {
     if (!ctx.trusted)
         return initial;
     const state = await readOwnRequestState(ctx);
-    const path = join(await runtime(ctx), `${sessionKey(ctx)}.freeze.json`);
-    try {
-        const info = await lstat(path);
-        if (!info.isFile() || info.isSymbolicLink() || info.size > 256)
-            throw new Error("Unsafe session freeze state");
-        const parsed = JSON.parse(await readFile(path, "utf8"));
-        if (!parsed || typeof parsed !== "object" || !("owner" in parsed) || typeof parsed.owner !== "string" || !/^[0-9a-f]{64}$/.test(parsed.owner))
-            throw new Error("Corrupt session freeze state");
-        return { ...state, frozen: true };
-    }
-    catch (error) {
-        if (error.code === "ENOENT")
-            return state;
-        throw error;
-    }
+    const session = await readSessionState(join(await runtime(ctx, false), `${sessionKey(ctx)}.freeze.json`));
+    return { ...state, frozen: state.frozen || session.owner !== undefined || session.frozenRequests.includes(ownerKey(ctx)) };
 }
 async function update(ctx, patch) {
     const dir = await runtime(ctx);
@@ -115,7 +112,38 @@ async function update(ctx, patch) {
         await unlink(guard);
     }
 }
-async function sessionFreeze(ctx, frozen) {
+async function readSessionState(path) {
+    try {
+        const info = await lstat(path);
+        if (!info.isFile() || info.isSymbolicLink() || info.size > 150_000)
+            throw new Error("Unsafe session freeze state");
+        const parsed = JSON.parse(await readFile(path, "utf8"));
+        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
+            throw new Error("Corrupt session freeze state");
+        const value = parsed;
+        if (value.owner === undefined && value.accepted === undefined)
+            throw new Error("Corrupt session freeze state");
+        // An older lock contains only {owner}; preserve its freeze on upgrade.
+        if (value.owner !== undefined && !isHash(value.owner))
+            throw new Error("Corrupt session freeze owner");
+        const accepted = value.accepted ?? [];
+        if (!Array.isArray(accepted) || accepted.length > MAX_ACCEPTED || !accepted.every(isHash) || new Set(accepted).size !== accepted.length)
+            throw new Error("Corrupt accepted request list");
+        if (value.lastAccepted !== undefined && (!isHash(value.lastAccepted) || !accepted.includes(value.lastAccepted)))
+            throw new Error("Corrupt last accepted request");
+        const frozenRequests = value.frozenRequests ?? (value.owner ? [value.owner] : []);
+        if (!Array.isArray(frozenRequests) || frozenRequests.length > MAX_ACCEPTED || !frozenRequests.every(isHash) || new Set(frozenRequests).size !== frozenRequests.length)
+            throw new Error("Corrupt frozen request list");
+        return { ...(value.owner ? { owner: value.owner } : {}), accepted, frozenRequests,
+            ...(value.lastAccepted ? { lastAccepted: value.lastAccepted } : {}) };
+    }
+    catch (error) {
+        if (error.code === "ENOENT")
+            return { accepted: [], frozenRequests: [] };
+        throw error;
+    }
+}
+async function updateSession(ctx, mutate) {
     const path = join(await runtime(ctx), `${sessionKey(ctx)}.freeze.json`);
     const guard = `${path}.lock`;
     let fd;
@@ -135,39 +163,29 @@ async function sessionFreeze(ctx, frozen) {
     if (!fd)
         throw new Error("Could not lock session freeze");
     try {
-        if (frozen) {
-            const temp = `${path}.${randomUUID()}.tmp`;
-            const file = await open(temp, "wx", 0o600);
-            try {
-                await file.writeFile(JSON.stringify({ owner: ownerKey(ctx) }));
-                await file.sync();
-            }
-            finally {
-                await file.close();
-            }
-            try {
-                await rename(temp, path);
-            }
-            catch (error) {
-                await unlink(temp).catch(() => { });
-                throw error;
-            }
+        const next = mutate(await readSessionState(path));
+        const temp = `${path}.${randomUUID()}.tmp`;
+        const file = await open(temp, "wx", 0o600);
+        try {
+            await file.writeFile(JSON.stringify(next));
+            await file.sync();
         }
-        else {
-            try {
-                const info = await lstat(path);
-                if (!info.isFile() || info.isSymbolicLink() || info.size > 256)
-                    throw new Error("Unsafe session freeze state");
-                const parsed = JSON.parse(await readFile(path, "utf8"));
-                if (!parsed || typeof parsed !== "object" || !("owner" in parsed) || typeof parsed.owner !== "string")
-                    throw new Error("Corrupt session freeze state");
-                if (parsed.owner === ownerKey(ctx))
-                    await unlink(path);
-            }
-            catch (error) {
-                if (error.code !== "ENOENT")
-                    throw error;
-            }
+        finally {
+            await file.close();
+        }
+        try {
+            await rename(temp, path);
+        }
+        catch (error) {
+            await unlink(temp).catch(() => { });
+            throw error;
+        }
+        const directory = await open(dirname(path), "r");
+        try {
+            await directory.sync();
+        }
+        finally {
+            await directory.close();
         }
     }
     finally {
@@ -175,16 +193,41 @@ async function sessionFreeze(ctx, frozen) {
         await unlink(guard);
     }
 }
-/** A correction freezes tools for every concurrent request in this session. Only its owner can clear it. */
-export async function freezeRequest(ctx) {
-    await sessionFreeze(ctx, true); // Fail closed if the second write is interrupted.
-    await update(ctx, { frozen: true });
+/** Record host acceptance before invoking onUserInput. A retried request cannot release a later freeze. */
+export async function acceptNewUserRequest(ctx) {
+    let result = { fresh: false, releasedPriorFreeze: false };
+    await updateSession(ctx, state => {
+        const id = ownerKey(ctx);
+        if (state.accepted.includes(id))
+            return state;
+        if (state.accepted.length === MAX_ACCEPTED)
+            throw new Error("Accepted request history full; start a new session");
+        const releasedPriorFreeze = state.owner !== undefined && state.owner !== id;
+        result = { fresh: true, releasedPriorFreeze };
+        return { ...state, accepted: [...state.accepted, id], lastAccepted: id,
+            owner: releasedPriorFreeze ? undefined : state.owner };
+    });
+    return result;
 }
+/** Freeze this request; an older retry cannot resurrect a superseded correction. */
+export async function freezeRequest(ctx) {
+    await updateSession(ctx, state => {
+        const id = ownerKey(ctx);
+        if (state.lastAccepted && state.lastAccepted !== id && state.accepted.includes(id))
+            return state;
+        if (!state.frozenRequests.includes(id) && state.frozenRequests.length === MAX_ACCEPTED)
+            throw new Error("Frozen request history full; start a new session");
+        return { ...state, owner: id, frozenRequests: state.frozenRequests.includes(id)
+                ? state.frozenRequests : [...state.frozenRequests, id] };
+    });
+}
+/** Explicit owner reset only; never call from Stop, turn_end, settlement or queued input. */
 export async function clearRequestFreeze(ctx) {
+    await updateSession(ctx, state => ({ ...state, owner: state.owner === ownerKey(ctx) ? undefined : state.owner,
+        frozenRequests: state.frozenRequests.filter(id => id !== ownerKey(ctx)) }));
     await update(ctx, { frozen: false });
-    await sessionFreeze(ctx, false);
 }
 export async function markPlanReviewed(ctx) { await update(ctx, { planReviewed: true }); }
 export function createFileRuntimeService() {
-    return { get: getRequestState, freeze: freezeRequest, clear: clearRequestFreeze, markPlanReviewed };
+    return { get: getRequestState, accept: acceptNewUserRequest, freeze: freezeRequest, clear: clearRequestFreeze, markPlanReviewed };
 }

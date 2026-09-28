@@ -20,6 +20,7 @@ export function fixtureServices({ initialized = true, initial = snapshot(), repl
   const requests = [];
   const requestStates = new Map();
   const sessionFreeze = new Map();
+  const accepted = new Map();
   const getRequest = (ctx) => requestStates.get(`${ctx.sessionId}:${ctx.requestId}`) ?? { frozen: false, planReviewed: false };
   const services = {
     provider: {
@@ -52,7 +53,21 @@ export function fixtureServices({ initialized = true, initial = snapshot(), repl
     },
     runtime: {
       async get(ctx) { return { ...structuredClone(getRequest(ctx)), frozen: getRequest(ctx).frozen || sessionFreeze.has(ctx.sessionId) }; },
-      async freeze(ctx) { sessionFreeze.set(ctx.sessionId, ctx.requestId); requestStates.set(`${ctx.sessionId}:${ctx.requestId}`, { ...getRequest(ctx), frozen: true }); },
+      async accept(ctx) {
+        const seen = accepted.get(ctx.sessionId) ?? new Set();
+        if (seen.has(ctx.requestId)) return { fresh: false, releasedPriorFreeze: false };
+        seen.add(ctx.requestId);
+        accepted.set(ctx.sessionId, seen);
+        const releasedPriorFreeze = sessionFreeze.has(ctx.sessionId) && sessionFreeze.get(ctx.sessionId) !== ctx.requestId;
+        if (releasedPriorFreeze) sessionFreeze.delete(ctx.sessionId);
+        return { fresh: true, releasedPriorFreeze };
+      },
+      async freeze(ctx) {
+        const seen = accepted.get(ctx.sessionId);
+        if (seen?.has(ctx.requestId) && [...seen].at(-1) !== ctx.requestId) return;
+        sessionFreeze.set(ctx.sessionId, ctx.requestId);
+        requestStates.set(`${ctx.sessionId}:${ctx.requestId}`, { ...getRequest(ctx), frozen: true });
+      },
       async clear(ctx) {
         if (sessionFreeze.get(ctx.sessionId) === ctx.requestId) sessionFreeze.delete(ctx.sessionId);
         requestStates.set(`${ctx.sessionId}:${ctx.requestId}`, { ...getRequest(ctx), frozen: false });

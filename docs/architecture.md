@@ -24,7 +24,10 @@ All entrypoints use an `EventContext { host, projectRoot, sessionId, requestId, 
 import { createHarness, type HarnessServices, type HarnessOptions } from "jev-harness";
 
 const harness = createHarness(services, { mode: "shadow" });
-await harness.onUserInput(event);               // Promise<Decision>
+const transition = await harness.acceptUserRequest({ context, source: "user", accepted: true });
+if (transition.fresh && transition.decision.status === "ready") {
+  await harness.onUserInput(event);             // Promise<Decision>, same context.requestId
+}
 await harness.onToolPreflight(event);            // Promise<Decision>
 await harness.onToolResult(event);               // Promise<ToolResultDecision>
 await harness.registerAttempt(event);            // Promise<Decision>
@@ -40,7 +43,15 @@ A `Decision` includes `gateId`, `mode`, `proposedAction`, `appliedAction`, `stat
 
 `GateDefinition<Input>` has `prepare(input, state): GateQuery | null` and `evaluate(input, answers, state): GateVerdict`. Its `thresholds` are readonly numbers. The dispatcher batches compatible questions triggered by the same event into one provider call while preserving each gate's evaluator and logged verdict. Experiment comparison has a 255-entry cap and at most eight concurrent requests. Partial coverage is marked on the decision and requires owner review in enforcement mode. `runBatchedGates` and `replayVerdict` support deterministic offline fixtures.
 
-`HarnessServices` injects a `DecisionProvider.decide(request, signal?)`, a `StateService.read(context)` and compare-and-swap `write(context, expectedRevision, mutation)`, an `AuditService.append(entry)`, optional `RuntimeService` request/session locks, and an optional clock. For file-backed integration use `createJevClient`, `createFileStateService`, `createFileRuntimeService`, and `createFileAuditService(context)`. Adapters must clear a correction lock only after its corrective request settles (or an explicit owner reset), not at every tool/model turn. Concurrent requests in the same session remain frozen until then. The provider returns untrusted JSON; call `validateAnswers(questions, payload)` before any evaluator. Fixtures in `test/support/fixtures.mjs` provide in-memory versions. The TypeSafe System One and OpenRouter Decisions transports share this contract; API keys live in the local environment, never in state files.
+`HarnessServices` injects a `DecisionProvider.decide(request, signal?)`, a `StateService.read(context)` and compare-and-swap `write(context, expectedRevision, mutation)`, an `AuditService.append(entry)`, `RuntimeService` request/session locks, and an optional clock. For file-backed integration use `createJevClient`, `createFileStateService`, `createFileRuntimeService`, and `createFileAuditService(context)`; a custom runtime must implement `accept(context)` as well as `get/freeze/clear/markPlanReviewed`. The provider returns untrusted JSON; call `validateAnswers(questions, payload)` before any evaluator. The TypeSafe System One and OpenRouter Decisions transports share this contract; API keys live in the local environment, never in state files.
+
+### Authenticated request transition
+
+`acceptUserRequest({context, source:"user", accepted:true})` is a **host-owned** transition. Call it once the host has accepted a genuinely human request for execution, before `onUserInput`, with the same `sessionId` and stable `requestId` throughout that request. A pending or queued input does not qualify. Only call `onUserInput` when the transition returns `fresh: true` and `decision.status === "ready"`; this suppresses duplicate captures and stale corrections on hook retries. A rejected source (`extension` or `agent`) cannot advance the lock, even if passed from JavaScript. Neither `Stop`, `turn_end`, `agent_end`, nor `agent_settled` authorizes a transition. Do not call the low-level `RuntimeService.accept` directly from an agent tool.
+
+In enforce mode, the transition is audited before mutating runtime state. It atomically records the accepted request and releases any *different* request's session-wide correction freeze. The old corrective request remains frozen, including its queued handoff; the new request can be classified by G4/G5, which may freeze it in turn. A retry of either request cannot release or resurrect a later freeze. Per-session accepted IDs and frozen request IDs survive restarts in ignored `.harness/runtime/`; the history is bounded at 1,024 requests and then fails closed until a new session. `clearRequestFreeze(context)` remains an explicit owner-reset primitive, not a settlement callback. In shadow mode the transition is observed but changes no runtime state. In uninitialized or untrusted projects it is inert. A failed audit or corrupt lock prevents the transition under enforcement.
+
+Reviewing a first harmless action does not grant a standing exemption. G6 reviews **every write, edit, and shell action**, including commands that might start long-lived work; G1 is batched with G6 for shell commands. After the first review, read-only tools do not re-run G6. Shadow does not mark plans reviewed. Classifying a shell command's effect requires the decision provider; this hook layer does not replace a sandbox or operating-system permission checks.
 
 ## Compaction ownership
 

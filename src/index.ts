@@ -3,7 +3,8 @@ export { validateAnswers } from "./core/answers.js";
 export { createJevClient, ProviderUnavailableError } from "./core/client.js";
 export type { JevClientOptions, JevTransport } from "./core/client.js";
 export { createFileStateService, initializeProject, readProject, classifyWritePath, canSendFileToJev } from "./core/state/files.js";
-export { createFileRuntimeService, getRequestState, freezeRequest, clearRequestFreeze, markPlanReviewed } from "./core/state/locks.js";
+export { createFileRuntimeService, getRequestState, acceptNewUserRequest, freezeRequest, clearRequestFreeze, markPlanReviewed } from "./core/state/locks.js";
+export type { AcceptedRequestState } from "./core/state/locks.js";
 export { createFileAuditService, loadAudit, replayVerdict } from "./core/report.js";
 export { runBatchedGates } from "./core/run.js";
 export { containsKnownSecret, redactText, redactValue, isPrivatePath } from "./core/redact.js";
@@ -17,7 +18,7 @@ export { g7Dedup } from "./core/gates/g7-dedup.js";
 export { g8Claim, validPairedComparison } from "./core/gates/g8-claim.js";
 export type { DedupComparison } from "./core/gates/g7-dedup.js";
 export type {
-  Action, AuditEntry, AuditService, Attempt, CheckClaimEvent, ChoiceQuestion,
+  AcceptedUserRequestEvent, AcceptedUserRequestTransition, Action, AuditEntry, AuditService, Attempt, CheckClaimEvent, ChoiceQuestion,
   CompactionAcknowledgmentEvent, CompactionDecision, CompactionValidationEvent,
   Decision, DecisionProvider, DecisionStatus, EventContext, Evidence, GateDefinition,
   GateQuery, GateVerdict, Harness, HarnessOptions, HarnessServices, Host, Mode,

@@ -16,6 +16,22 @@ export interface UserInputEvent {
     readonly text: string;
     readonly source: "user" | "extension" | "agent";
 }
+/** Called only after the host has accepted a fresh, authentic human request for execution.
+ * A queued prompt, extension handoff, Stop, or agent settlement is not an accepted request.
+ * The adapter must use the same requestId for this transition and its onUserInput call.
+ */
+export interface AcceptedUserRequestEvent {
+    readonly context: EventContext;
+    readonly source: "user";
+    readonly accepted: true;
+}
+export interface AcceptedUserRequestTransition {
+    readonly decision: Decision;
+    /** False on a retry of a requestId already accepted in this session. Skip onUserInput then. */
+    readonly fresh: boolean;
+    /** A different request's active correction freeze was released. */
+    readonly releasedPriorFreeze: boolean;
+}
 export interface ToolPreflightEvent {
     readonly context: EventContext;
     readonly callId: string;
@@ -262,8 +278,15 @@ export interface RuntimeService {
         frozen: boolean;
         planReviewed: boolean;
     }>>;
+    /** Atomically remembers an accepted request and releases a different request's session freeze.
+     * Returns fresh=false for retries, which must not re-run user-input capture or correction detection.
+     */
+    accept(context: EventContext): Promise<Readonly<{
+        fresh: boolean;
+        releasedPriorFreeze: boolean;
+    }>>;
     freeze(context: EventContext): Promise<void>;
-    /** Called only when the corrective request settles or the owner explicitly resets it. */
+    /** Explicit owner reset only. Do not call from Stop, turn_end, or agent settlement. */
     clear(context: EventContext): Promise<void>;
     markPlanReviewed(context: EventContext): Promise<void>;
 }
@@ -280,6 +303,8 @@ export interface HarnessOptions {
     readonly signal?: AbortSignal;
 }
 export interface Harness {
+    /** Call after host acceptance, before onUserInput; only call onUserInput if fresh=true. */
+    acceptUserRequest(event: AcceptedUserRequestEvent): Promise<AcceptedUserRequestTransition>;
     onUserInput(event: UserInputEvent): Promise<Decision>;
     onToolPreflight(event: ToolPreflightEvent): Promise<Decision>;
     onToolResult(event: ToolResultEvent): Promise<ToolResultDecision>;
