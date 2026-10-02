@@ -55,7 +55,7 @@ export function createDefaultPiHarnessOptions(env = process.env) {
             state: createFileStateService(),
             runtime,
             audit: createFileAuditService(context),
-        }, { mode }),
+        }, { mode, allowExternalReads: env.JH_ALLOW_EXTERNAL_READS === "1" }),
     };
 }
 export default function jevHarnessPi(pi) {

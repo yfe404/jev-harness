@@ -213,6 +213,7 @@ export function createHarness(services, options = {}) {
         throw new Error("Invalid harness mode");
     const runtime = services.runtime ?? createFileRuntimeService();
     const evidenceWorkflow = options.evidenceWorkflow === true;
+    const allowExternalReads = options.allowExternalReads === true;
     const signal = options.signal;
     const registryFor = (ctx) => services.compactionRegistry ?? createFileCompactionRegistry(ctx);
     async function snapshot(ctx, gateId) {
@@ -405,7 +406,7 @@ export function createHarness(services, options = {}) {
             const path = event.input.path;
             if (event.intent === "read" && typeof path === "string") {
                 try {
-                    if (!(await canSendFileToJev(event.context.projectRoot, path))) {
+                    if (!allowExternalReads && !(await canSendFileToJev(event.context.projectRoot, path))) {
                         const restricted = await hard(event.context, state, "g3-result", { action: "redact", reason: "Private file output excluded from remote judgment" }, event.canReplaceOutput ? undefined : "remind");
                         return event.canReplaceOutput && mode === "enforce"
                             ? { decision: restricted, replacement: "[Private file output withheld]" }

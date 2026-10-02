@@ -62,7 +62,7 @@ export function createDefaultPiHarnessOptions(env: Readonly<Record<string, strin
       state: createFileStateService(),
       runtime,
       audit: createFileAuditService(context),
-    }, { mode }),
+    }, { mode, allowExternalReads: env.JH_ALLOW_EXTERNAL_READS === "1" }),
   };
 }
 

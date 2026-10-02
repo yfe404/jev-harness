@@ -373,6 +373,9 @@ export interface HarnessOptions {
      * evidence-stagnation tracking. Default false: acknowledgments are still
      * validated, deduplicated, and audited, but counters never move. */
     readonly evidenceWorkflow?: boolean;
+    /** AGI host opt-in: pass owner-authorized reads outside the project to G3.
+     * Known credential detection and write protections still apply. */
+    readonly allowExternalReads?: boolean;
 }
 export interface Harness {
     /** Call after host acceptance, before onUserInput; only call onUserInput if fresh=true. */

@@ -105,6 +105,8 @@ export interface PiHarnessOptions {
   readonly exemptTools?: readonly string[];
   /** Bound on injected policy text. */
   readonly policyCharLimit?: number;
+  /** Pass owner-authorized external file reads to G3 in enforce mode. */
+  readonly allowExternalReads?: boolean;
   readonly bridge?: PiHarnessBridge;
   readonly now?: () => Date;
 }
