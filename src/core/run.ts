@@ -308,6 +308,15 @@ export function createHarness(services: HarnessServices, options: HarnessOptions
         raw = JSON.stringify(scanned);
       } catch { return unavailable(mode, "tool-preflight", "Tool input is not JSON-compatible"); }
       if (containsKnownSecret(raw)) return hard(event.context, state, "g2-write", { action: "block", reason: "Tool input contains a credential", alternative: "Use a local secret store and ask the owner for a safe approach." });
+      // The AGI host explicitly authorizes owner-selected external reads (for
+      // example ~/exchange research files). Do not make Jev infer project-goal
+      // relevance for those reads; output screening still runs afterward.
+      if (allowExternalReads && event.intent === "read" && typeof event.input.path === "string") {
+        try {
+          if (await classifyWritePath(event.context.projectRoot, event.input.path) === "outside")
+            return audit(services, event.context, state, decision(mode, "external-read", { action: "allow", reason: "Owner-authorized external read" }));
+        } catch { return unavailable(mode, "external-read", "Cannot resolve external read path safely"); }
+      }
       if (event.intent === "write" || event.intent === "edit") {
         if (typeof event.input.path !== "string") return hard(event.context, state, "g2-write", { action: "escalate", reason: "No target path for file modification" });
         try {

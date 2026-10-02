@@ -161,6 +161,14 @@ test('structured harness evidence determines trial results, including setup fail
   assert.equal((await h.recordEvidence({ context: context(), evidence: { ...evidence, id: 'e2', source: 'tool' }, result: 'confirmed', attemptId: 'a-setup' })).appliedAction, 'escalate');
 });
 
+test('AGI external-read opt-in skips goal gating for owner-authorized outside reads', async () => {
+  const fx = fixtureServices({ reply: responseFor() });
+  const h = createHarness(fx.services, { mode: 'enforce', allowExternalReads: true });
+  const result = await h.onToolPreflight({ ...tool({ context: { ...context(), projectRoot: process.cwd() }, toolName: 'read', intent: 'read', input: { path: '/tmp/owner-authorized.md' } }) });
+  assert.equal(result.appliedAction, 'allow');
+  assert.equal(fx.requests.length, 0, 'G6 did not ask Jev to judge the explicit external-read opt-in');
+});
+
 test('AGI external-read opt-in passes owner-authorized outside files to screening', async () => {
   const fx = fixtureServices({ reply: responseFor() });
   const h = createHarness(fx.services, { mode: 'enforce', allowExternalReads: true });
